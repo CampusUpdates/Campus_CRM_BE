@@ -22,6 +22,8 @@ import { ConfigModule } from '@nestjs/config';
 import { OfficeModule } from './office/office.module';
 import { LeadStatusModule } from './lead-status/lead-status.module';
 import { PositionsModule } from './positions/positions.module';
+import { CommonModule } from './common/common.module'
+
 
 @Module({
   imports: [
@@ -44,7 +46,7 @@ import { PositionsModule } from './positions/positions.module';
     AttendanceModule, 
     DashboardModule, 
     ActivityLogModule, 
-    PrismaModule, OfficeModule, LeadStatusModule, PositionsModule],
+    PrismaModule, OfficeModule, LeadStatusModule, PositionsModule, CommonModule],
   controllers: [AppController],
   providers: [AppService],
 })

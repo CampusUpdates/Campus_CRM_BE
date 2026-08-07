@@ -129,7 +129,6 @@ enum NotificationType {
   SYSTEM
 }
 
-
 enum ActivityType {
   USER
 
@@ -164,7 +163,7 @@ model Role {
   id           Int     @id @default(autoincrement())
   name         String  @unique
   description  String?
-  displayOrder Int     @default(0)
+  displayOrder Int     @unique
   isActive     Boolean @default(true)
 
   users     User[]
@@ -185,7 +184,7 @@ model Team {
 }
 
 model User {
-  id             Int       @id @default(autoincrement())
+  id             String    @id @default(uuid()) @db.Uuid
   firstName      String
   lastName       String?
   email          String    @unique
@@ -193,34 +192,37 @@ model User {
   alternatePhone String?
   dob            DateTime? @db.Date
   passwordHash   String
+  username       String    @unique
+
+  mustChangePassword Boolean @default(true)
 
   status UserStatus @default(ACTIVE)
 
   roleId    Int
   teamId    Int
-  managerId Int?
+  managerId String? @db.Uuid
 
   role Role @relation(fields: [roleId], references: [id])
 
   team Team @relation(fields: [teamId], references: [id])
 
-  manager User? @relation("UserManager", fields: [managerId], references: [id])
+  manager      User?  @relation("UserManager", fields: [managerId], references: [id])
   subordinates User[] @relation("UserManager")
 
   uploadedAttachments Attachment[] @relation("AttachmentUploader")
 
-  approvedColleges        College[]        @relation("CollegeApprover")
-  createdLeads            Lead[]           @relation("LeadCreator")
-  createdInteractions     Interaction[]    @relation("InteractionCreator")
-  tpcHistory              TPCUser[]        @relation("TPCUserHistory")
-  assignedTPCs            TPC[]            @relation("TPCAssignee")
-  conductedInterviews     Interview[]      @relation("CandidateInterviewer")
-  assignedDataAssignments DataAssignment[] @relation("StudentDataAssignee")
-  dataUploads             DataUpload[]     @relation("DataUploader")
+  approvedColleges        College[]               @relation("CollegeApprover")
+  createdLeads            Lead[]                  @relation("LeadCreator")
+  createdInteractions     Interaction[]           @relation("InteractionCreator")
+  tpcHistory              TPCUser[]               @relation("TPCUserHistory")
+  assignedTPCs            TPC[]                   @relation("TPCAssignee")
+  conductedInterviews     Interview[]             @relation("CandidateInterviewer")
+  assignedDataAssignments DataAssignment[]        @relation("StudentDataAssignee")
+  dataUploads             DataUpload[]            @relation("DataUploader")
   notifications           NotificationRecipient[] @relation("NotificationRecipient")
-  activities              ActivityLog[]    @relation("UserActivities")
-  createdDataAssignments  DataAssignment[] @relation("StudentDataAssigner")
-  attendance              Attendance[]     @relation("UserAttendance")
+  activities              ActivityLog[]           @relation("UserActivities")
+  createdDataAssignments  DataAssignment[]        @relation("StudentDataAssigner")
+  attendance              Attendance[]            @relation("UserAttendance")
 
   leadAssignments LeadAssignment[]
 
@@ -233,7 +235,7 @@ model User {
 model Course {
   id Int @id @default(autoincrement())
 
-  collegeId Int
+  collegeId String @db.Uuid
 
   name String
   fees Decimal @db.Decimal(10, 2)
@@ -247,10 +249,10 @@ model Course {
 }
 
 model CollegeCompetitor {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  collegeId           Int
-  competitorCollegeId Int
+  collegeId           String @db.Uuid
+  competitorCollegeId String @db.Uuid
 
   createdAt DateTime @default(now())
 
@@ -262,7 +264,7 @@ model CollegeCompetitor {
 }
 
 model College {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
   name        String @unique
   description String
@@ -280,16 +282,16 @@ model College {
 
   hasTieUp Boolean @default(false)
 
-  approvedById Int
+  approvedById String?  @db.Uuid
   approvedAt   DateTime @default(now())
 
-  isActive Boolean @default(true)
+  isActive Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // Relationships
-  approvedBy User @relation("CollegeApprover", fields: [approvedById], references: [id])
+  approvedBy User? @relation("CollegeApprover", fields: [approvedById], references: [id])
 
   courses Course[]
 
@@ -307,7 +309,7 @@ model LeadStatus {
   name        String @unique
   description String
 
-  displayOrder Int @default(0)
+  displayOrder Int @unique
 
   color String
 
@@ -320,10 +322,10 @@ model LeadStatus {
 }
 
 model Lead {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
   statusId    Int
-  createdById Int
+  createdById String @db.Uuid
 
   firstName String
   lastName  String?
@@ -371,8 +373,8 @@ model Lead {
 model LeadAssignment {
   id Int @id @default(autoincrement())
 
-  leadId Int
-  userId Int
+  leadId String @db.Uuid
+  userId String @db.Uuid
 
   assignedAt DateTime @default(now())
   expiresAt  DateTime
@@ -389,10 +391,10 @@ model LeadAssignment {
 }
 
 model Interaction {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  leadId      Int
-  createdById Int
+  leadId      String @db.Uuid
+  createdById String @db.Uuid
 
   title       String?
   description String
@@ -410,10 +412,10 @@ model Interaction {
 }
 
 model Attachment {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  interactionId Int
-  uploadedById  Int
+  interactionId String @db.Uuid
+  uploadedById  String @db.Uuid
 
   fileName String
   fileUrl  String
@@ -431,10 +433,10 @@ model Attachment {
 }
 
 model TPC {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  leadId       Int
-  assignedToId Int
+  leadId       String @db.Uuid
+  assignedToId String @db.Uuid
 
   status TPCStatus @default(ACTIVE)
 
@@ -449,10 +451,10 @@ model TPC {
 }
 
 model TPCUser {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  tpcId  Int
-  userId Int
+  tpcId  String @db.Uuid
+  userId String @db.Uuid
 
   assignedAt DateTime @default(now())
 
@@ -487,7 +489,7 @@ model Position {
 }
 
 model Candidate {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
   positionId Int
 
@@ -519,10 +521,10 @@ model Candidate {
 }
 
 model Interview {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  candidateId   Int
-  interviewerId Int?
+  candidateId   String @db.Uuid
+  interviewerId String @db.Uuid
 
   scheduledAt DateTime
 
@@ -544,9 +546,9 @@ model Interview {
 }
 
 model DataUpload {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  uploadedById Int
+  uploadedById String @db.Uuid
 
   fileName String
   fileUrl  String
@@ -566,9 +568,9 @@ model DataUpload {
 }
 
 model StudentData {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  uploadId Int
+  uploadId String @db.Uuid
 
   firstName  String
   middleName String?
@@ -592,10 +594,10 @@ model StudentData {
 }
 
 model DataAssignment {
-  id Int @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  assignedToId Int
-  assignedById Int
+  assignedToId String @db.Uuid
+  assignedById String @db.Uuid
 
   assignedAt DateTime @default(now())
   expiresAt  DateTime
@@ -618,8 +620,8 @@ model DataAssignment {
 model DataAssignmentItem {
   id Int @id @default(autoincrement())
 
-  dataAssignmentId Int
-  studentDataId    Int
+  dataAssignmentId String @db.Uuid
+  studentDataId    String @db.Uuid
 
   // Relationships
   assignment  DataAssignment @relation(fields: [dataAssignmentId], references: [id])
@@ -630,101 +632,100 @@ model DataAssignmentItem {
 }
 
 model Notification {
-  id          Int      @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  title       String
-  message     String
+  title   String
+  message String
 
-  type        NotificationType
+  type NotificationType
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 
   // Relationships
-  recipients  NotificationRecipient[]
+  recipients NotificationRecipient[]
 }
 
 model NotificationRecipient {
-  id              Int       @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  notificationId  Int
-  userId          Int
+  notificationId String @db.Uuid
+  userId         String @db.Uuid
 
-  isRead          Boolean   @default(false)
-  readAt          DateTime?
+  isRead Boolean   @default(false)
+  readAt DateTime?
 
-  createdAt       DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   // Relationships
-  notification    Notification @relation(fields: [notificationId], references: [id])
+  notification Notification @relation(fields: [notificationId], references: [id])
 
   user User @relation("NotificationRecipient", fields: [userId], references: [id])
-  @@unique([notificationId, userId])
 
+  @@unique([notificationId, userId])
   @@index([notificationId])
   @@index([userId])
 }
 
 model ActivityLog {
-  id          Int      @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  userId      Int
+  userId String @db.Uuid
 
-  activity    ActivityType
+  activity ActivityType
 
-  entityType  String
-  entityId    Int
+  entityType String
+  entityId   String
 
   description String?
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 
   // Relationships
-  user        User @relation("UserActivities", fields: [userId], references: [id])
+  user User @relation("UserActivities", fields: [userId], references: [id])
 
   @@index([userId])
   @@index([entityType, entityId])
 }
 
 model Office {
-  id          Int      @id @default(autoincrement())
+  id Int @id @default(autoincrement())
 
-  name        String   @unique
+  name String @unique
 
-  address     String?
+  address String?
 
-  city        String?
-  state       String?
+  city  String?
+  state String?
 
-  isActive    Boolean  @default(true)
+  isActive Boolean @default(true)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Relationships
-  attendance  Attendance[]
+  attendance Attendance[]
 }
 
 model Attendance {
-  id           Int      @id @default(autoincrement())
+  id String @id @default(uuid()) @db.Uuid
 
-  userId       Int
-  officeId     Int
+  userId   String @db.Uuid
+  officeId Int
 
-  date         DateTime @db.Date
+  date DateTime @db.Date
 
-  checkIn      DateTime?
-  checkOut     DateTime?
+  checkIn  DateTime?
+  checkOut DateTime?
 
-  status       AttendanceStatus
+  status AttendanceStatus
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Relationships
-  user         User @relation("UserAttendance", fields: [userId], references: [id])
-  office       Office @relation( fields: [officeId], references: [id])
+  user   User   @relation("UserAttendance", fields: [userId], references: [id])
+  office Office @relation(fields: [officeId], references: [id])
 
   @@unique([userId, date])
-
   @@index([officeId])
 }

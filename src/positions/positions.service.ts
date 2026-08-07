@@ -4,37 +4,37 @@ import { CreatePositionDto } from './dto/create-positions.dto';
 
 @Injectable()
 export class PositionsService {
-    constructor(private readonly prisma: PrismaService) {}
-    //find positions
-    async findAll() {
-  const positions = await this.prisma.position.findMany({
-    orderBy: {
-      title: 'asc',
-    },
-  });
+  constructor(private readonly prisma: PrismaService) { }
+  //find positions
+  async findAll() {
+    const positions = await this.prisma.position.findMany({
+      orderBy: {
+        title: 'asc',
+      },
+    });
 
-  return positions;
-}
-//create positions
-    async create(createPositionDto: CreatePositionDto) {
-  const existingPosition = await this.prisma.position.findUnique({
-    where: {
-      title: createPositionDto.title,
-    },
-  });
-
-  if (existingPosition) {
-    throw new ConflictException('Position already exists.');
+    return positions;
   }
+  //create positions
+  async create(createPositionDto: CreatePositionDto) {
+    const existingPosition = await this.prisma.position.findUnique({
+      where: {
+        title: createPositionDto.title,
+      },
+    });
 
-  const position = await this.prisma.position.create({
-  data: {
-    title: createPositionDto.title,
-    department: createPositionDto.department,
-    description: createPositionDto.description,
-  },
-});
+    if (existingPosition) {
+      throw new ConflictException('Position already exists.');
+    }
 
-return position;
-}
+    const position = await this.prisma.position.create({
+      data: {
+        title: createPositionDto.title,
+        department: createPositionDto.department,
+        description: createPositionDto.description,
+      },
+    });
+
+    return position;
+  }
 }

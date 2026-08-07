@@ -6,6 +6,17 @@ import { CreateLeadStatusDto } from './dto/create-lead-status.dto';
 export class LeadStatusService {
   constructor(private readonly prisma: PrismaService) {}
 
+  //find leadstatus
+  async findAll() {
+    const leadStatuses = await this.prisma.leadStatus.findMany({
+      orderBy: {
+        displayOrder: 'asc',
+      },
+    });
+
+    return leadStatuses;
+  }
+  //create leadstatus
   async create(createLeadStatusDto: CreateLeadStatusDto) {
     const existingLeadStatus = await this.prisma.leadStatus.findUnique({
       where: {
@@ -16,26 +27,21 @@ export class LeadStatusService {
     if (existingLeadStatus) {
       throw new ConflictException('Lead status already exists.');
     }
-
+    const lastOrder = await this.prisma.leadStatus.findFirst({
+      orderBy:{
+        displayOrder: 'desc'
+      }
+    })
+    const nextDisplayOrder = lastOrder ? lastOrder.displayOrder + 1: 1
     const leadStatus = await this.prisma.leadStatus.create({
       data: {
         name: createLeadStatusDto.name,
         description: createLeadStatusDto.description,
-        displayOrder: createLeadStatusDto.displayOrder,
+        displayOrder: nextDisplayOrder,
         color: createLeadStatusDto.color,
       },
     });
 
     return leadStatus;
-  }
-
-  async findAll() {
-    const leadStatuses = await this.prisma.leadStatus.findMany({
-      orderBy: {
-        displayOrder: 'asc',
-      },
-    });
-
-    return leadStatuses;
   }
 }

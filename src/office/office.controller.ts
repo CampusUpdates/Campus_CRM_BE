@@ -2,7 +2,7 @@ import { Body, Controller, Get, Post } from '@nestjs/common';
 import { OfficeService } from './office.service';
 import { CreateOfficeDto } from './dto/create-office.dto';
 
-@Controller('offices')
+@Controller('office')
 export class OfficeController {
   constructor(private readonly officeService: OfficeService) {}
 

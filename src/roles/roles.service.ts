@@ -17,7 +17,6 @@ export class RolesService {
             },)
         return result
     }
-
     //create new role
     async create(createRoleDto: CreateRoleDto) {
         //check if role already exists
@@ -30,12 +29,17 @@ export class RolesService {
         if (existingRole) {
             throw new ConflictException('Role already exists.');
         }
-
+        const lastRole = await this.prisma.role.findFirst({
+            orderBy: {
+                displayOrder: 'desc',
+            },
+        });
+        const nextDisplayOrder = lastRole ? lastRole.displayOrder + 1 : 1;
         const role = await this.prisma.role.create({
             data: {
                 name: createRoleDto.name,
                 description: createRoleDto.description,
-                displayOrder: createRoleDto.displayOrder,
+                displayOrder: nextDisplayOrder,
             },
         });
 
