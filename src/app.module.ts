@@ -23,6 +23,7 @@ import { OfficeModule } from './office/office.module';
 import { LeadStatusModule } from './lead-status/lead-status.module';
 import { PositionsModule } from './positions/positions.module';
 import { CommonModule } from './common/common.module'
+import { PermissionsModule } from './permissions/permissions.module';
 
 
 @Module({
@@ -46,7 +47,7 @@ import { CommonModule } from './common/common.module'
     AttendanceModule, 
     DashboardModule, 
     ActivityLogModule, 
-    PrismaModule, OfficeModule, LeadStatusModule, PositionsModule, CommonModule],
+    PrismaModule, OfficeModule, LeadStatusModule, PositionsModule, CommonModule, PermissionsModule],
   controllers: [AppController],
   providers: [AppService],
 })

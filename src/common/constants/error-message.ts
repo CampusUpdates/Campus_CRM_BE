@@ -12,4 +12,9 @@ export const ERROR_MESSAGES = {
   ROLE_NOT_FOUND: 'Role not found.',
   TEAM_NOT_FOUND: 'Team not found.',
   USER_NOT_FOUND: 'User not found.',
+
+  INVALID_CREDENTIALS: 'Invalid credentials',
+  USER_ACCOUNT_INACTIVE: 'User account is inactive',
+  INVALID_USER: 'Invalid user',
+  PASSWORD_CHANGED_SUCCESSFULLY: 'Password changed successfully',
 };

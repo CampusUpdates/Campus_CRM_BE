@@ -46,15 +46,6 @@ enum LeadSource {
   OTHER
 }
 
-enum LeadStatusType {
-  NEW
-  APPLICATION
-  INTERVIEW_SCHEDULED
-  INTERVIEW_DONE
-  LETTER_OUT
-  ADMISSION_DONE
-}
-
 enum Gender {
   MALE
   FEMALE
@@ -166,9 +157,35 @@ model Role {
   displayOrder Int     @unique
   isActive     Boolean @default(true)
 
-  users     User[]
+  users       User[]
+  permissions RolePermission[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model Permission {
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  description String?
+  isActive    Boolean @default(true)
+
+  roles RolePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RolePermission {
+  roleId       Int
+  permissionId Int
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([roleId, permissionId])
 }
 
 model Team {
@@ -184,30 +201,30 @@ model Team {
 }
 
 model User {
-  id             String    @id @default(uuid()) @db.Uuid
-  firstName      String
-  lastName       String?
-  email          String    @unique
-  phone          String    @unique
-  alternatePhone String?
-  dob            DateTime? @db.Date
-  passwordHash   String
-  username       String    @unique
-
-  mustChangePassword Boolean @default(true)
+  id                 String    @id @default(uuid()) @db.Uuid
+  firstName          String
+  lastName           String?
+  email              String    @unique
+  phone              String    @unique
+  alternatePhone     String?
+  dob                DateTime? @db.Date
+  passwordHash       String
+  username           String    @unique
+  mustChangePassword Boolean   @default(true)
 
   status UserStatus @default(ACTIVE)
 
   roleId    Int
-  teamId    Int
+  teamId    Int?
   managerId String? @db.Uuid
 
   role Role @relation(fields: [roleId], references: [id])
 
-  team Team @relation(fields: [teamId], references: [id])
+  team Team? @relation(fields: [teamId], references: [id])
 
-  manager      User?  @relation("UserManager", fields: [managerId], references: [id])
-  subordinates User[] @relation("UserManager")
+  manager                   User?         @relation("UserManager", fields: [managerId], references: [id])
+  subordinates              User[]        @relation("UserManager")
+  processedLeadApplications LeadCollege[]
 
   uploadedAttachments Attachment[] @relation("AttachmentUploader")
 
@@ -287,8 +304,9 @@ model College {
 
   isActive Boolean @default(false)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  leadApplications LeadCollege[]
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   // Relationships
   approvedBy User? @relation("CollegeApprover", fields: [approvedById], references: [id])
@@ -311,9 +329,9 @@ model LeadStatus {
 
   displayOrder Int @unique
 
-  color String
-
-  isActive Boolean @default(true)
+  color       String
+  leadCollege LeadCollege[]
+  isActive    Boolean       @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -330,10 +348,10 @@ model Lead {
   firstName String
   lastName  String?
 
-  phone          String
-  alternatePhone String?
-
-  email String?
+  phone               String
+  alternatePhone      String?
+  collegeApplications LeadCollege[]
+  email               String?
 
   gender      Gender?
   dateOfBirth DateTime? @db.Date
@@ -388,6 +406,30 @@ model LeadAssignment {
   user User @relation(fields: [userId], references: [id])
 
   @@unique([leadId, userId, assignedAt])
+}
+
+model LeadCollege {
+  id String @id @default(uuid()) @db.Uuid
+
+  leadId    String @db.Uuid
+  collegeId String @db.Uuid
+  statusId  Int
+
+  processedById String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead        Lead       @relation(fields: [leadId], references: [id])
+  college     College    @relation(fields: [collegeId], references: [id])
+  status      LeadStatus @relation(fields: [statusId], references: [id])
+  processedBy User?      @relation(fields: [processedById], references: [id])
+
+  @@unique([leadId, collegeId])
+  @@index([leadId])
+  @@index([collegeId])
+  @@index([statusId])
+  @@index([processedById])
 }
 
 model Interaction {

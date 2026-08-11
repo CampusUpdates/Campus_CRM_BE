@@ -1,0 +1,15 @@
+export const USER_SAFE_SELECT = {
+  id: true,
+  firstName: true,
+  lastName: true,
+  email: true,
+  phone: true,
+  alternatePhone: true,
+  dob: true,
+  username: true,
+  status: true,
+  teamId: true,
+  managerId: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
