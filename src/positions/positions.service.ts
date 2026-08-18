@@ -4,7 +4,7 @@ import { CreatePositionDto } from './dto/create-positions.dto';
 
 @Injectable()
 export class PositionsService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
   //find positions
   async findAll() {
     const positions = await this.prisma.position.findMany({

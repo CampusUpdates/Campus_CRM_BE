@@ -3,9 +3,13 @@ import {
   ExecutionContext,
   ForbiddenException,
   Injectable,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { Request } from 'express';
+import { JwtPayload } from '../../interfaces/authenticated-request.interface';
+import { PERMISSIONS_KEY } from 'src/permissions/permissions.decorator';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
@@ -16,7 +20,7 @@ export class PermissionsGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const requiredPermissions = this.reflector.getAllAndOverride<string[]>(
-      'permissions',
+      PERMISSIONS_KEY,
       [context.getHandler(), context.getClass()],
     );
 
@@ -25,30 +29,43 @@ export class PermissionsGuard implements CanActivate {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const user = request.user;
+    const request = context
+      .switchToHttp()
+      .getRequest<Request & { user?: JwtPayload }>();
+    const userPayload = request.user;
 
-    if (!user) {
-      throw new ForbiddenException('User not authenticated');
+    if (!userPayload || !userPayload.sub) {
+      throw new UnauthorizedException('User authentication required');
     }
 
-    // Super Admin has unrestricted access
-    const role = await this.prisma.role.findUnique({
-      where: {
-        id: user.roleId,
-      },
+    // Verify user exists and is active in database
+    const dbUser = await this.prisma.user.findUnique({
+      where: { id: userPayload.sub },
       select: {
-        name: true,
+        id: true,
+        status: true,
+        roleId: true,
+        role: {
+          select: {
+            id: true,
+            name: true,
+            isActive: true,
+          },
+        },
       },
     });
 
-    if (role?.name === 'SUPER_ADMIN') {
-      return true;
+    if (!dbUser || dbUser.status !== 'ACTIVE') {
+      throw new UnauthorizedException('User account is inactive or suspended');
+    }
+
+    if (!dbUser.role || !dbUser.role.isActive) {
+      throw new ForbiddenException('User role is inactive or missing');
     }
 
     const userPermissions = await this.prisma.rolePermission.findMany({
       where: {
-        roleId: user.roleId,
+        roleId: dbUser.roleId,
         permission: {
           name: {
             in: requiredPermissions,
@@ -65,16 +82,14 @@ export class PermissionsGuard implements CanActivate {
       },
     });
 
-    const permissionNames = userPermissions.map(
-      (item) => item.permission.name,
-    );
+    const permissionNames = userPermissions.map((item) => item.permission.name);
 
-    const hasPermission = requiredPermissions.every((permission) =>
+    const hasAllPermissions = requiredPermissions.every((permission) =>
       permissionNames.includes(permission),
     );
 
-    if (!hasPermission) {
-      throw new ForbiddenException('Insufficient permissions');
+    if (!hasAllPermissions) {
+      throw new ForbiddenException('Access denied: Insufficient permissions');
     }
 
     return true;

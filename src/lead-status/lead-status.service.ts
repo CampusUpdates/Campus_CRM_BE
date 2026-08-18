@@ -28,11 +28,11 @@ export class LeadStatusService {
       throw new ConflictException('Lead status already exists.');
     }
     const lastOrder = await this.prisma.leadStatus.findFirst({
-      orderBy:{
-        displayOrder: 'desc'
-      }
-    })
-    const nextDisplayOrder = lastOrder ? lastOrder.displayOrder + 1: 1
+      orderBy: {
+        displayOrder: 'desc',
+      },
+    });
+    const nextDisplayOrder = lastOrder ? lastOrder.displayOrder + 1 : 1;
     const leadStatus = await this.prisma.leadStatus.create({
       data: {
         name: createLeadStatusDto.name,

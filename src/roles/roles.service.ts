@@ -5,44 +5,43 @@ import { ConflictException } from '@nestjs/common';
 
 @Injectable()
 export class RolesService {
-    constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
-    //find all roles 
-    async findAll() {
-        const result = await this.prisma.role.findMany(
-            {
-                orderBy: {
-                    displayOrder: 'asc'
-                }
-            },)
-        return result
+  //find all roles
+  async findAll() {
+    const result = await this.prisma.role.findMany({
+      orderBy: {
+        displayOrder: 'asc',
+      },
+    });
+    return result;
+  }
+  //create new role
+  async create(createRoleDto: CreateRoleDto) {
+    //check if role already exists
+    const existingRole = await this.prisma.role.findUnique({
+      where: {
+        name: createRoleDto.name,
+      },
+    });
+
+    if (existingRole) {
+      throw new ConflictException('Role already exists.');
     }
-    //create new role
-    async create(createRoleDto: CreateRoleDto) {
-        //check if role already exists
-        const existingRole = await this.prisma.role.findUnique({
-            where: {
-                name: createRoleDto.name,
-            },
-        });
+    const lastRole = await this.prisma.role.findFirst({
+      orderBy: {
+        displayOrder: 'desc',
+      },
+    });
+    const nextDisplayOrder = lastRole ? lastRole.displayOrder + 1 : 1;
+    const role = await this.prisma.role.create({
+      data: {
+        name: createRoleDto.name,
+        description: createRoleDto.description,
+        displayOrder: nextDisplayOrder,
+      },
+    });
 
-        if (existingRole) {
-            throw new ConflictException('Role already exists.');
-        }
-        const lastRole = await this.prisma.role.findFirst({
-            orderBy: {
-                displayOrder: 'desc',
-            },
-        });
-        const nextDisplayOrder = lastRole ? lastRole.displayOrder + 1 : 1;
-        const role = await this.prisma.role.create({
-            data: {
-                name: createRoleDto.name,
-                description: createRoleDto.description,
-                displayOrder: nextDisplayOrder,
-            },
-        });
-
-        return role;
-    }
+    return role;
+  }
 }

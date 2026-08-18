@@ -1,10 +1,10 @@
 import {
+  IsArray,
   IsEmail,
   IsEnum,
   IsInt,
   IsNumber,
   IsOptional,
-  IsPhoneNumber,
   IsString,
   Min,
   Max,
@@ -33,6 +33,14 @@ export class CreateLeadDto {
   @IsOptional()
   @IsEnum(Gender)
   gender?: Gender;
+
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  state?: string;
 
   @IsOptional()
   dateOfBirth?: Date;
@@ -74,6 +82,11 @@ export class CreateLeadDto {
   @IsOptional()
   @IsInt()
   passingYear?: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  collegeIds?: string[];
 
   @IsEnum(LeadSource)
   source!: LeadSource;

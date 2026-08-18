@@ -22,32 +22,37 @@ import { ConfigModule } from '@nestjs/config';
 import { OfficeModule } from './office/office.module';
 import { LeadStatusModule } from './lead-status/lead-status.module';
 import { PositionsModule } from './positions/positions.module';
-import { CommonModule } from './common/common.module'
+import { CommonModule } from './common/common.module';
 import { PermissionsModule } from './permissions/permissions.module';
-
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
     }),
-    AuthModule, 
-    UsersModule, 
-    RolesModule, 
-    TeamsModule, 
-    CollegesModule, 
-    CoursesModule, 
-    CompetitorsModule, 
-    LeadsModule, 
-    TpcModule, 
-    CandidatesModule, 
-    InterviewsModule, 
-    UploadsModule, 
+    AuthModule,
+    UsersModule,
+    RolesModule,
+    TeamsModule,
+    CollegesModule,
+    CoursesModule,
+    CompetitorsModule,
+    LeadsModule,
+    TpcModule,
+    CandidatesModule,
+    InterviewsModule,
+    UploadsModule,
     NotificationsModule,
-    AttendanceModule, 
-    DashboardModule, 
-    ActivityLogModule, 
-    PrismaModule, OfficeModule, LeadStatusModule, PositionsModule, CommonModule, PermissionsModule],
+    AttendanceModule,
+    DashboardModule,
+    ActivityLogModule,
+    PrismaModule,
+    OfficeModule,
+    LeadStatusModule,
+    PositionsModule,
+    CommonModule,
+    PermissionsModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

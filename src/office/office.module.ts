@@ -4,6 +4,6 @@ import { OfficeService } from './office.service';
 
 @Module({
   controllers: [OfficeController],
-  providers: [OfficeService]
+  providers: [OfficeService],
 })
 export class OfficeModule {}
