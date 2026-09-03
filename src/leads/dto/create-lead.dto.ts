@@ -1,8 +1,10 @@
 import {
+  ArrayMinSize,
   IsArray,
   IsEmail,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
@@ -13,6 +15,7 @@ import {
 import { Gender, LeadSource, CourseType } from '@prisma/client';
 
 export class CreateLeadDto {
+  @IsNotEmpty({ message: 'First name is required' })
   @IsString()
   firstName!: string;
 
@@ -20,6 +23,7 @@ export class CreateLeadDto {
   @IsString()
   lastName?: string;
 
+  @IsNotEmpty({ message: 'Phone number is required' })
   @IsString()
   phone!: string;
 
@@ -27,23 +31,25 @@ export class CreateLeadDto {
   @IsString()
   alternatePhone?: string;
 
-  @IsEmail()
-  email?: string;
+  @IsNotEmpty({ message: 'Email address is required' })
+  @IsEmail({}, { message: 'Please enter a valid email address' })
+  email!: string;
 
   @IsOptional()
   @IsEnum(Gender)
   gender?: Gender;
 
-  @IsOptional()
+  @IsNotEmpty({ message: 'City is required' })
   @IsString()
-  city?: string;
+  city!: string;
 
-  @IsOptional()
+  @IsNotEmpty({ message: 'State is required' })
   @IsString()
-  state?: string;
+  state!: string;
 
   @IsOptional()
   dateOfBirth?: Date;
+
 
   @IsOptional()
   @IsNumber()
@@ -83,11 +89,16 @@ export class CreateLeadDto {
   @IsInt()
   passingYear?: number;
 
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  collegeIds?: string[];
+  @IsArray({ message: 'At least one college must be selected' })
+  @ArrayMinSize(1, { message: 'At least one college must be selected' })
+  @IsString({ each: true, message: 'Invalid college ID' })
+  collegeIds!: string[];
 
   @IsEnum(LeadSource)
   source!: LeadSource;
+
+  @IsOptional()
+  @IsInt()
+  statusId?: number;
 }
+

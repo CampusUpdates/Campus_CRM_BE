@@ -7,7 +7,518 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ENUMS
+model Test {
+  id        Int      @id @default(autoincrement())
+  name      String
+  createdAt DateTime @default(now())
+}
+
+model Role {
+  id           Int              @id @default(autoincrement())
+  name         String           @unique
+  description  String?
+  displayOrder Int              @unique
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  permissions  RolePermission[]
+  users        User[]
+}
+
+model Permission {
+  id          Int              @id @default(autoincrement())
+  name        String           @unique
+  description String?
+  isActive    Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       Int
+  permissionId Int
+  scope        PermissionScope @default(ALL)
+  createdAt    DateTime        @default(now())
+  permission   Permission      @relation(fields: [permissionId], references: [id])
+  role         Role            @relation(fields: [roleId], references: [id])
+
+  @@id([roleId, permissionId])
+}
+
+model Team {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  managerId   String   @db.Uuid
+  manager     User     @relation("TeamManager", fields: [managerId], references: [id])
+  users       User[]   @relation("TeamMembers")
+
+  @@index([managerId])
+}
+
+model User {
+  id                        String                  @id @default(uuid()) @db.Uuid
+  firstName                 String
+  lastName                  String?
+  email                     String                  @unique
+  phone                     String                  @unique
+  alternatePhone            String?
+  dob                       DateTime?               @db.Date
+  passwordHash              String
+  username                  String                  @unique
+  mustChangePassword        Boolean                 @default(true)
+  status                    UserStatus              @default(ACTIVE)
+  roleId                    Int
+  teamId                    Int?
+  managerId                 String?                 @db.Uuid
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+  activities                ActivityLog[]           @relation("UserActivities")
+  uploadedAttachments       Attachment[]            @relation("AttachmentUploader")
+  attendance                Attendance[]            @relation("UserAttendance")
+  approvedColleges          College[]               @relation("CollegeApprover")
+  createdDataAssignments    DataAssignment[]        @relation("StudentDataAssigner")
+  assignedDataAssignments   DataAssignment[]        @relation("StudentDataAssignee")
+  dataUploads               DataUpload[]            @relation("DataUploader")
+  createdInteractions       Interaction[]           @relation("InteractionCreator")
+  conductedInterviews       Interview[]             @relation("CandidateInterviewer")
+  createdLeads              Lead[]                  @relation("LeadCreator")
+  leadAssignments           LeadAssignment[]
+  pitchedLeadApplications   LeadCollege[]           @relation("LeadCollegePitcher")
+  processedLeadApplications LeadCollege[]           @relation("LeadCollegeApprover")
+  notifications             NotificationRecipient[] @relation("NotificationRecipient")
+  tpcAssignmentsCreated     TPCUser[]               @relation("TPCAssignedBy")
+  tpcAssignmentsReceived    TPCUser[]               @relation("TPCAssignedTo")
+  tpcAssignmentsCompleted   TPCUser[]               @relation("TPCCompletedBy")
+  teamsManaged              Team[]                  @relation("TeamManager")
+  todos                     Todo[]                  @relation("UserTodos")
+  conductedLeadInterviews   LeadCollegeInterview[]  @relation("LeadInterviewCoordinator")
+  issuedSelectionLetters    SelectionLetter[]       @relation("SelectionLetterIssuer")
+  processedLeadPayments     LeadCollegePayment[]    @relation("LeadPaymentProcessor")
+  changedLeadCollegeHistories LeadCollegeHistory[]  @relation("LeadHistoryChanger")
+  manager                   User?                   @relation("UserManager", fields: [managerId], references: [id])
+
+  subordinates              User[]                  @relation("UserManager")
+  role                      Role                    @relation(fields: [roleId], references: [id])
+  team                      Team?                   @relation("TeamMembers", fields: [teamId], references: [id])
+}
+
+model Course {
+  id        Int      @id @default(autoincrement())
+  collegeId String   @db.Uuid
+  name      String
+  fees      Decimal  @db.Decimal(10, 2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  college   College  @relation(fields: [collegeId], references: [id])
+}
+
+model CollegeCompetitor {
+  id                  String   @id @default(uuid()) @db.Uuid
+  collegeId           String   @db.Uuid
+  competitorCollegeId String   @db.Uuid
+  createdAt           DateTime @default(now())
+  college             College  @relation("PrimaryCollege", fields: [collegeId], references: [id])
+  competitorCollege   College  @relation("CompetitorCollege", fields: [competitorCollegeId], references: [id])
+
+  @@unique([collegeId, competitorCollegeId])
+}
+
+model College {
+  id               String              @id @default(uuid()) @db.Uuid
+  name             String              @unique
+  description      String
+  contactPerson    String?
+  phone            String?
+  email            String?
+  website          String?
+  address          String?
+  city             String?
+  state            String?
+  admissionProcess String?
+  hasTieUp         Boolean             @default(false)
+  requiresApproval Boolean             @default(false)
+  approvedById     String?             @db.Uuid
+  approvedAt       DateTime            @default(now())
+  isActive         Boolean             @default(false)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  approvedBy       User?               @relation("CollegeApprover", fields: [approvedById], references: [id])
+  competitors      CollegeCompetitor[] @relation("PrimaryCollege")
+  competesWith     CollegeCompetitor[] @relation("CompetitorCollege")
+  courses          Course[]
+  leadApplications LeadCollege[]
+  finalEnrolledLeads Lead[]            @relation("FinalCollege")
+
+  @@index([approvedById])
+
+}
+
+model LeadStatus {
+  id           Int           @id @default(autoincrement())
+  name         String        @unique
+  description  String
+  displayOrder Int           @unique
+  color        String
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  leads              Lead[]
+  leadCollege        LeadCollege[]
+  historyFromStatus  LeadCollegeHistory[] @relation("LeadHistoryFromStatus")
+  historyToStatus    LeadCollegeHistory[] @relation("LeadHistoryToStatus")
+}
+
+
+model Lead {
+  id                       String           @id @default(uuid()) @db.Uuid
+  statusId                 Int
+  createdById              String           @db.Uuid
+  firstName                String
+  lastName                 String?
+  phone                    String
+  alternatePhone           String?
+  email                    String?
+  gender                   Gender?
+  dateOfBirth              DateTime?        @db.Date
+  city                     String?
+  state                    String?
+  tenthPercentage          Float?
+  twelfthPercentage        Float?
+  graduationPercentage     Float?
+  graduationCourse         String?
+  graduationSpecialization String?
+  courseInterested         CourseType?
+  specializationInterested String?
+  passingYear              Int?
+  source                   LeadSource
+  finalCollegeId           String?          @db.Uuid
+  createdAt                DateTime         @default(now())
+  updatedAt                DateTime         @updatedAt
+  interactions             Interaction[]
+  createdBy                User             @relation("LeadCreator", fields: [createdById], references: [id])
+  status                   LeadStatus       @relation(fields: [statusId], references: [id])
+  finalCollege             College?         @relation("FinalCollege", fields: [finalCollegeId], references: [id], onDelete: SetNull)
+  assignments              LeadAssignment[]
+  collegeApplications      LeadCollege[]
+  tpcs                     TPC[]
+
+  @@index([statusId])
+  @@index([createdById])
+  @@index([finalCollegeId])
+
+}
+
+model LeadAssignment {
+  id         Int                  @id @default(autoincrement())
+  leadId     String               @db.Uuid
+  userId     String               @db.Uuid
+  assignedAt DateTime             @default(now())
+  expiresAt  DateTime
+  status     LeadAssignmentStatus @default(ACTIVE)
+  createdAt  DateTime             @default(now())
+  lead       Lead                 @relation(fields: [leadId], references: [id])
+  user       User                 @relation(fields: [userId], references: [id])
+
+  @@unique([leadId, userId, assignedAt])
+}
+
+model LeadCollege {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  leadId                String                 @db.Uuid
+  collegeId             String                 @db.Uuid
+  statusId              Int
+  pitchedById           String                 @db.Uuid
+  processedById         String?                @db.Uuid
+  approvalStatus        CollegeStatus          @default(APPROVED)
+  applicationId         String?
+  coursePitched         String?
+  specializationPitched String?
+  feePitched            Decimal?               @db.Decimal(10, 2)
+  isCancelled           Boolean                @default(false)
+  cancelledAt           DateTime?
+  cancellationReason    String?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  college               College                @relation(fields: [collegeId], references: [id])
+  lead                  Lead                   @relation(fields: [leadId], references: [id])
+  pitchedBy             User                   @relation("LeadCollegePitcher", fields: [pitchedById], references: [id])
+  processedBy           User?                  @relation("LeadCollegeApprover", fields: [processedById], references: [id])
+  status                LeadStatus             @relation(fields: [statusId], references: [id])
+  interviews            LeadCollegeInterview[]
+  selectionLetters      SelectionLetter[]
+  payments              LeadCollegePayment[]
+  history               LeadCollegeHistory[]
+
+  @@unique([leadId, collegeId])
+  @@index([leadId])
+  @@index([collegeId])
+  @@index([statusId])
+  @@index([pitchedById])
+  @@index([processedById])
+  @@index([applicationId])
+}
+
+
+model Interaction {
+  id          String       @id @default(uuid()) @db.Uuid
+  leadId      String       @db.Uuid
+  createdById String       @db.Uuid
+  title       String?
+  description String
+  createdAt   DateTime     @default(now())
+  attachments Attachment[]
+  createdBy   User         @relation("InteractionCreator", fields: [createdById], references: [id])
+  lead        Lead         @relation(fields: [leadId], references: [id])
+
+  @@index([leadId])
+  @@index([createdById])
+}
+
+model Attachment {
+  id            String      @id @default(uuid()) @db.Uuid
+  interactionId String      @db.Uuid
+  uploadedById  String      @db.Uuid
+  fileName      String
+  fileUrl       String
+  fileType      String
+  fileSize      Int
+  uploadedAt    DateTime    @default(now())
+  interaction   Interaction @relation(fields: [interactionId], references: [id])
+  uploadedBy    User        @relation("AttachmentUploader", fields: [uploadedById], references: [id])
+
+  @@index([interactionId])
+  @@index([uploadedById])
+}
+
+model TPC {
+  id          String    @id @default(uuid()) @db.Uuid
+  leadId      String    @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lead        Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignments TPCUser[]
+
+  @@index([leadId])
+}
+
+model TPCUser {
+  id            String        @id @default(uuid()) @db.Uuid
+  tpcId         String        @db.Uuid
+  assignedById  String        @db.Uuid
+  assignedToId  String        @db.Uuid
+  completedById String?       @db.Uuid
+  assignedAt    DateTime      @default(now())
+  completedAt   DateTime?
+  status        TPCUserStatus @default(PENDING)
+  createdAt     DateTime      @default(now())
+  assignedBy    User          @relation("TPCAssignedBy", fields: [assignedById], references: [id])
+  assignedTo    User          @relation("TPCAssignedTo", fields: [assignedToId], references: [id])
+  completedBy   User?         @relation("TPCCompletedBy", fields: [completedById], references: [id])
+  tpc           TPC           @relation(fields: [tpcId], references: [id], onDelete: Cascade)
+
+  @@index([tpcId])
+  @@index([assignedById])
+  @@index([assignedToId])
+  @@index([completedById])
+}
+
+model Position {
+  id          Int         @id @default(autoincrement())
+  title       String      @unique
+  department  String
+  description String?
+  vacancies   Int         @default(0)
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  candidates  Candidate[]
+}
+
+model Candidate {
+  id             String          @id @default(uuid()) @db.Uuid
+  positionId     Int
+  firstName      String
+  lastName       String?
+  phone          String          @unique
+  alternatePhone String?
+  email          String?         @unique
+  gender         Gender?
+  dateOfBirth    DateTime?       @db.Date
+  resumeUrl      String?
+  experience     Int?
+  currentCompany String?
+  status         CandidateStatus @default(APPLIED)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  position       Position        @relation(fields: [positionId], references: [id])
+  interviews     Interview[]
+}
+
+model Interview {
+  id            String          @id @default(uuid()) @db.Uuid
+  candidateId   String          @db.Uuid
+  interviewerId String          @db.Uuid
+  scheduledAt   DateTime
+  status        InterviewStatus @default(SCHEDULED)
+  result        InterviewResult @default(PENDING)
+  feedback      String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  candidate     Candidate       @relation(fields: [candidateId], references: [id])
+  interviewer   User            @relation("CandidateInterviewer", fields: [interviewerId], references: [id])
+
+  @@index([candidateId])
+  @@index([interviewerId])
+}
+
+model DataUpload {
+  id           String           @id @default(uuid()) @db.Uuid
+  uploadedById String           @db.Uuid
+  fileName     String
+  fileUrl      String
+  totalRecords Int
+  status       DataUploadStatus @default(PROCESSING)
+  uploadedAt   DateTime         @default(now())
+  uploadedBy   User             @relation("DataUploader", fields: [uploadedById], references: [id])
+  studentData  StudentData[]
+
+  @@index([uploadedById])
+}
+
+model StudentData {
+  id              String               @id @default(uuid()) @db.Uuid
+  uploadId        String               @db.Uuid
+  firstName       String
+  middleName      String?
+  lastName        String?
+  phone           String
+  email           String?
+  city            String?
+  state           String?
+  createdAt       DateTime             @default(now())
+  assignmentItems DataAssignmentItem[]
+  upload          DataUpload           @relation(fields: [uploadId], references: [id])
+
+  @@index([uploadId])
+  @@index([phone])
+}
+
+model DataAssignment {
+  id           String               @id @default(uuid()) @db.Uuid
+  assignedToId String               @db.Uuid
+  assignedById String               @db.Uuid
+  assignedAt   DateTime             @default(now())
+  expiresAt    DateTime
+  reclaimedAt  DateTime?
+  status       DataAssignmentStatus @default(ACTIVE)
+  createdAt    DateTime             @default(now())
+  assignedBy   User                 @relation("StudentDataAssigner", fields: [assignedById], references: [id])
+  assignedTo   User                 @relation("StudentDataAssignee", fields: [assignedToId], references: [id])
+  items        DataAssignmentItem[]
+
+  @@index([assignedToId])
+  @@index([assignedById])
+}
+
+model DataAssignmentItem {
+  id               Int            @id @default(autoincrement())
+  dataAssignmentId String         @db.Uuid
+  studentDataId    String         @db.Uuid
+  assignment       DataAssignment @relation(fields: [dataAssignmentId], references: [id])
+  studentData      StudentData    @relation(fields: [studentDataId], references: [id])
+
+  @@unique([dataAssignmentId, studentDataId])
+  @@index([studentDataId])
+}
+
+model Notification {
+  id         String                  @id @default(uuid()) @db.Uuid
+  title      String
+  message    String
+  type       NotificationType
+  createdAt  DateTime                @default(now())
+  recipients NotificationRecipient[]
+}
+
+model NotificationRecipient {
+  id             String       @id @default(uuid()) @db.Uuid
+  notificationId String       @db.Uuid
+  userId         String       @db.Uuid
+  isRead         Boolean      @default(false)
+  readAt         DateTime?
+  createdAt      DateTime     @default(now())
+  notification   Notification @relation(fields: [notificationId], references: [id])
+  user           User         @relation("NotificationRecipient", fields: [userId], references: [id])
+
+  @@unique([notificationId, userId])
+  @@index([notificationId])
+  @@index([userId])
+}
+
+model ActivityLog {
+  id          String       @id @default(uuid()) @db.Uuid
+  userId      String       @db.Uuid
+  activity    ActivityType
+  entityType  String
+  entityId    String
+  description String?
+  createdAt   DateTime     @default(now())
+  user        User         @relation("UserActivities", fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType, entityId])
+}
+
+model Office {
+  id         Int          @id @default(autoincrement())
+  name       String       @unique
+  address    String?
+  city       String?
+  state      String?
+  isActive   Boolean      @default(true)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  attendance Attendance[]
+}
+
+model Attendance {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  officeId  Int
+  date      DateTime         @db.Date
+  checkIn   DateTime?
+  checkOut  DateTime?
+  status    AttendanceStatus
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  office    Office           @relation(fields: [officeId], references: [id])
+  user      User             @relation("UserAttendance", fields: [userId], references: [id])
+
+  @@unique([userId, date])
+  @@index([officeId])
+}
+
+model Todo {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  title       String
+  description String?
+  dueDate     DateTime @db.Date
+  isCompleted Boolean  @default(false)
+  priority    String   @default("MEDIUM")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation("UserTodos", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([dueDate])
+}
 
 enum UserStatus {
   ACTIVE
@@ -53,14 +564,11 @@ enum Gender {
 }
 
 enum TPCUserStatus {
-  ACTIVE
-  COMPLETED
-}
-
-enum TPCStatus {
-  ACTIVE
+  PENDING
   COMPLETED
   CANCELLED
+  NO_REPLY
+  NOT_INTERESTED
 }
 
 enum AttendanceStatus {
@@ -110,6 +618,7 @@ enum DataAssignmentStatus {
   ACTIVE
   COMPLETED
   EXPIRED
+  RECLAIMED
 }
 
 enum NotificationType {
@@ -122,652 +631,139 @@ enum NotificationType {
 
 enum ActivityType {
   USER
-
   LEAD
   COLLEGE
-
   DATA_UPLOAD
   DATA_ASSIGNMENT
-
   TPC
-
   CANDIDATE
   INTERVIEW
-
   NOTIFICATION
-
   ATTENDANCE
-
   SYSTEM
 }
 
-//MODELS
-
-model Test {
-  id   Int    @id @default(autoincrement())
-  name String
-
-  createdAt DateTime @default(now())
+enum PermissionScope {
+  OWN
+  TEAM
+  ALL
 }
 
-model Role {
-  id           Int     @id @default(autoincrement())
-  name         String  @unique
-  description  String?
-  displayOrder Int     @unique
-  isActive     Boolean @default(true)
-
-  users       User[]
-  permissions RolePermission[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model Permission {
-  id          Int     @id @default(autoincrement())
-  name        String  @unique
-  description String?
-  isActive    Boolean @default(true)
-
-  roles RolePermission[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model RolePermission {
-  roleId       Int
-  permissionId Int
-
-  role       Role       @relation(fields: [roleId], references: [id])
-  permission Permission @relation(fields: [permissionId], references: [id])
-
-  createdAt DateTime @default(now())
-
-  @@id([roleId, permissionId])
-}
-
-model Team {
-  id          Int     @id @default(autoincrement())
-  name        String  @unique
-  description String?
-  isActive    Boolean @default(true)
-
-  users User[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model User {
-  id                 String    @id @default(uuid()) @db.Uuid
-  firstName          String
-  lastName           String?
-  email              String    @unique
-  phone              String    @unique
-  alternatePhone     String?
-  dob                DateTime? @db.Date
-  passwordHash       String
-  username           String    @unique
-  mustChangePassword Boolean   @default(true)
-
-  status UserStatus @default(ACTIVE)
-
-  roleId    Int
-  teamId    Int?
-  managerId String? @db.Uuid
-
-  role Role @relation(fields: [roleId], references: [id])
-
-  team Team? @relation(fields: [teamId], references: [id])
-
-  manager                   User?         @relation("UserManager", fields: [managerId], references: [id])
-  subordinates              User[]        @relation("UserManager")
-  processedLeadApplications LeadCollege[]
-
-  uploadedAttachments Attachment[] @relation("AttachmentUploader")
-
-  approvedColleges        College[]               @relation("CollegeApprover")
-  createdLeads            Lead[]                  @relation("LeadCreator")
-  createdInteractions     Interaction[]           @relation("InteractionCreator")
-  tpcHistory              TPCUser[]               @relation("TPCUserHistory")
-  assignedTPCs            TPC[]                   @relation("TPCAssignee")
-  conductedInterviews     Interview[]             @relation("CandidateInterviewer")
-  assignedDataAssignments DataAssignment[]        @relation("StudentDataAssignee")
-  dataUploads             DataUpload[]            @relation("DataUploader")
-  notifications           NotificationRecipient[] @relation("NotificationRecipient")
-  activities              ActivityLog[]           @relation("UserActivities")
-  createdDataAssignments  DataAssignment[]        @relation("StudentDataAssigner")
-  attendance              Attendance[]            @relation("UserAttendance")
-
-  leadAssignments LeadAssignment[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-// College Model 
-
-model Course {
-  id Int @id @default(autoincrement())
-
-  collegeId String @db.Uuid
-
-  name String
-  fees Decimal @db.Decimal(10, 2)
-
-  isActive Boolean @default(true)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  college College @relation(fields: [collegeId], references: [id])
-}
-
-model CollegeCompetitor {
-  id String @id @default(uuid()) @db.Uuid
-
-  collegeId           String @db.Uuid
-  competitorCollegeId String @db.Uuid
-
-  createdAt DateTime @default(now())
-
-  college College @relation("PrimaryCollege", fields: [collegeId], references: [id])
-
-  competitorCollege College @relation("CompetitorCollege", fields: [competitorCollegeId], references: [id])
-
-  @@unique([collegeId, competitorCollegeId])
-}
-
-model College {
-  id String @id @default(uuid()) @db.Uuid
-
-  name        String @unique
-  description String
-
-  contactPerson String?
-  phone         String?
-  email         String?
-  website       String?
-
-  address String?
-  city    String?
-  state   String?
-
-  admissionProcess String?
-
-  hasTieUp Boolean @default(false)
-
-  approvedById String?  @db.Uuid
-  approvedAt   DateTime @default(now())
-
-  isActive Boolean @default(false)
-
-  leadApplications LeadCollege[]
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
-
-  // Relationships
-  approvedBy User? @relation("CollegeApprover", fields: [approvedById], references: [id])
-
-  courses Course[]
-
-  competitors  CollegeCompetitor[] @relation("PrimaryCollege")
-  competesWith CollegeCompetitor[] @relation("CompetitorCollege")
-
-  @@index([approvedById])
-}
-
-// LEADS
-
-model LeadStatus {
-  id Int @id @default(autoincrement())
-
-  name        String @unique
-  description String
-
-  displayOrder Int @unique
-
-  color       String
-  leadCollege LeadCollege[]
-  isActive    Boolean       @default(true)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  leads Lead[]
-}
-
-model Lead {
-  id String @id @default(uuid()) @db.Uuid
-
-  statusId    Int
-  createdById String @db.Uuid
-
-  firstName String
-  lastName  String?
-
-  phone               String
-  alternatePhone      String?
-  collegeApplications LeadCollege[]
-  email               String?
-
-  gender      Gender?
-  dateOfBirth DateTime? @db.Date
-
-  city  String?
-  state String?
-
-  tenthPercentage      Float?
-  twelfthPercentage    Float?
-  graduationPercentage Float?
-
-  graduationCourse         String?
-  graduationSpecialization String?
-
-  courseInterested         CourseType?
-  specializationInterested String?
-
-  passingYear Int?
-
-  source       LeadSource
-  interactions Interaction[]
-  tpcs         TPC[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  status    LeadStatus @relation(fields: [statusId], references: [id])
-  createdBy User       @relation("LeadCreator", fields: [createdById], references: [id])
-
-  assignments LeadAssignment[]
-
-  @@index([statusId])
-  @@index([createdById])
-}
-
-model LeadAssignment {
-  id Int @id @default(autoincrement())
-
-  leadId String @db.Uuid
-  userId String @db.Uuid
-
-  assignedAt DateTime @default(now())
-  expiresAt  DateTime
-
-  status LeadAssignmentStatus @default(ACTIVE)
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  lead Lead @relation(fields: [leadId], references: [id])
-  user User @relation(fields: [userId], references: [id])
-
-  @@unique([leadId, userId, assignedAt])
-}
-
-model LeadCollege {
-  id String @id @default(uuid()) @db.Uuid
-
-  leadId    String @db.Uuid
-  collegeId String @db.Uuid
-  statusId  Int
-
-  processedById String? @db.Uuid
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  lead        Lead       @relation(fields: [leadId], references: [id])
-  college     College    @relation(fields: [collegeId], references: [id])
-  status      LeadStatus @relation(fields: [statusId], references: [id])
-  processedBy User?      @relation(fields: [processedById], references: [id])
-
-  @@unique([leadId, collegeId])
-  @@index([leadId])
-  @@index([collegeId])
-  @@index([statusId])
-  @@index([processedById])
-}
-
-model Interaction {
-  id String @id @default(uuid()) @db.Uuid
-
-  leadId      String @db.Uuid
-  createdById String @db.Uuid
-
-  title       String?
-  description String
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  lead      Lead @relation(fields: [leadId], references: [id])
-  createdBy User @relation("InteractionCreator", fields: [createdById], references: [id])
-
-  attachments Attachment[]
-
-  @@index([leadId])
-  @@index([createdById])
-}
-
-model Attachment {
-  id String @id @default(uuid()) @db.Uuid
-
-  interactionId String @db.Uuid
-  uploadedById  String @db.Uuid
-
-  fileName String
-  fileUrl  String
-  fileType String
-  fileSize Int
-
-  uploadedAt DateTime @default(now())
-
-  // Relationships
-  interaction Interaction @relation(fields: [interactionId], references: [id])
-  uploadedBy  User        @relation("AttachmentUploader", fields: [uploadedById], references: [id])
-
-  @@index([interactionId])
-  @@index([uploadedById])
-}
-
-model TPC {
-  id String @id @default(uuid()) @db.Uuid
-
-  leadId       String @db.Uuid
-  assignedToId String @db.Uuid
-
-  status TPCStatus @default(ACTIVE)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  lead       Lead @relation(fields: [leadId], references: [id])
-  assignedTo User @relation("TPCAssignee", fields: [assignedToId], references: [id])
-
-  users TPCUser[]
-}
-
-model TPCUser {
-  id String @id @default(uuid()) @db.Uuid
-
-  tpcId  String @db.Uuid
-  userId String @db.Uuid
-
-  assignedAt DateTime @default(now())
-
-  status TPCUserStatus @default(ACTIVE)
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  tpc  TPC  @relation(fields: [tpcId], references: [id])
-  user User @relation("TPCUserHistory", fields: [userId], references: [id])
-
-  @@index([tpcId])
-  @@index([userId])
-}
-
-model Position {
-  id Int @id @default(autoincrement())
-
-  title       String  @unique
-  department  String
-  description String?
-
-  vacancies Int @default(0)
-
-  isActive Boolean @default(true)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  candidates Candidate[]
-}
-
-model Candidate {
-  id String @id @default(uuid()) @db.Uuid
-
-  positionId Int
-
-  firstName String
-  lastName  String?
-
-  phone          String  @unique
-  alternatePhone String?
-
-  email String? @unique
-
-  gender      Gender?
-  dateOfBirth DateTime? @db.Date
-
-  resumeUrl String?
-
-  experience     Int? // Years of experience
-  currentCompany String?
-
-  status CandidateStatus @default(APPLIED)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  position Position @relation(fields: [positionId], references: [id])
-
-  interviews Interview[]
-}
-
-model Interview {
-  id String @id @default(uuid()) @db.Uuid
-
-  candidateId   String @db.Uuid
-  interviewerId String @db.Uuid
-
-  scheduledAt DateTime
-
-  status InterviewStatus @default(SCHEDULED)
-  result InterviewResult @default(PENDING)
-
-  feedback String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  candidate Candidate @relation(fields: [candidateId], references: [id])
-
-  interviewer User? @relation("CandidateInterviewer", fields: [interviewerId], references: [id])
-
-  @@index([candidateId])
+model LeadCollegeInterview {
+  id                String               @id @default(uuid()) @db.Uuid
+  leadCollegeId     String               @db.Uuid
+  interviewerId     String?              @db.Uuid
+  scheduledAt       DateTime
+  conductedAt       DateTime?
+  status            LeadInterviewStatus  @default(SCHEDULED)
+  result            LeadInterviewResult  @default(PENDING)
+  feedback          String?
+  meetingLink       String?
+  rescheduledFromId String?              @db.Uuid
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  leadCollege       LeadCollege          @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  interviewer       User?                @relation("LeadInterviewCoordinator", fields: [interviewerId], references: [id], onDelete: SetNull)
+  rescheduledFrom   LeadCollegeInterview? @relation("RescheduledInterviews", fields: [rescheduledFromId], references: [id], onDelete: SetNull)
+  rescheduledTo     LeadCollegeInterview[] @relation("RescheduledInterviews")
+
+  @@index([leadCollegeId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@index([rescheduledFromId])
   @@index([interviewerId])
 }
 
-model DataUpload {
-  id String @id @default(uuid()) @db.Uuid
+model SelectionLetter {
+  id                String      @id @default(uuid()) @db.Uuid
+  leadCollegeId     String      @db.Uuid
+  letterUrl         String?
+  issuedAt          DateTime
+  admissionLastDate DateTime
+  issuedById        String?     @db.Uuid
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  leadCollege       LeadCollege @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  issuedBy          User?       @relation("SelectionLetterIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
 
-  uploadedById String @db.Uuid
-
-  fileName String
-  fileUrl  String
-
-  totalRecords Int
-
-  status DataUploadStatus @default(PROCESSING)
-
-  uploadedAt DateTime @default(now())
-
-  // Relationships
-  uploadedBy User @relation("DataUploader", fields: [uploadedById], references: [id])
-
-  studentData StudentData[]
-
-  @@index([uploadedById])
+  @@index([leadCollegeId])
+  @@index([issuedAt])
+  @@index([admissionLastDate])
+  @@index([issuedById])
 }
 
-model StudentData {
-  id String @id @default(uuid()) @db.Uuid
+model LeadCollegePayment {
+  id              String             @id @default(uuid()) @db.Uuid
+  leadCollegeId   String             @db.Uuid
+  type            LeadPaymentType
+  amount          Decimal            @db.Decimal(10, 2)
+  transactionRef  String?
+  paymentMode     String?
+  paidAt          DateTime           @default(now())
+  remarks         String?
+  processedById   String?            @db.Uuid
+  parentPaymentId String?            @db.Uuid
+  refundStatus    LeadRefundStatus?
+  createdAt       DateTime           @default(now())
+  leadCollege     LeadCollege        @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  processedBy     User?              @relation("LeadPaymentProcessor", fields: [processedById], references: [id], onDelete: SetNull)
+  parentPayment   LeadCollegePayment? @relation("PaymentRefunds", fields: [parentPaymentId], references: [id], onDelete: SetNull)
+  refunds         LeadCollegePayment[] @relation("PaymentRefunds")
 
-  uploadId String @db.Uuid
-
-  firstName  String
-  middleName String?
-  lastName   String?
-
-  phone String
-  email String?
-
-  city  String?
-  state String?
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  upload DataUpload @relation(fields: [uploadId], references: [id])
-
-  assignmentItems DataAssignmentItem[]
-
-  @@index([uploadId])
-  @@index([phone])
+  @@index([leadCollegeId])
+  @@index([paidAt])
+  @@index([type])
+  @@index([parentPaymentId])
+  @@index([refundStatus])
+  @@index([processedById])
 }
 
-model DataAssignment {
-  id String @id @default(uuid()) @db.Uuid
+model LeadCollegeHistory {
+  id            String      @id @default(uuid()) @db.Uuid
+  leadCollegeId String      @db.Uuid
+  fromStatusId  Int?
+  toStatusId    Int
+  changedById   String?     @db.Uuid
+  remarks       String?
+  createdAt     DateTime    @default(now())
+  leadCollege   LeadCollege @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  fromStatus    LeadStatus? @relation("LeadHistoryFromStatus", fields: [fromStatusId], references: [id], onDelete: SetNull)
+  toStatus      LeadStatus  @relation("LeadHistoryToStatus", fields: [toStatusId], references: [id], onDelete: Restrict)
+  changedBy     User?       @relation("LeadHistoryChanger", fields: [changedById], references: [id], onDelete: SetNull)
 
-  assignedToId String @db.Uuid
-  assignedById String @db.Uuid
-
-  assignedAt DateTime @default(now())
-  expiresAt  DateTime
-
-  status DataAssignmentStatus @default(ACTIVE)
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  assignedTo User @relation("StudentDataAssignee", fields: [assignedToId], references: [id])
-
-  assignedBy User @relation("StudentDataAssigner", fields: [assignedById], references: [id])
-
-  items DataAssignmentItem[]
-
-  @@index([assignedToId])
-  @@index([assignedById])
+  @@index([leadCollegeId])
+  @@index([createdAt])
+  @@index([fromStatusId])
+  @@index([toStatusId])
+  @@index([changedById])
 }
 
-model DataAssignmentItem {
-  id Int @id @default(autoincrement())
-
-  dataAssignmentId String @db.Uuid
-  studentDataId    String @db.Uuid
-
-  // Relationships
-  assignment  DataAssignment @relation(fields: [dataAssignmentId], references: [id])
-  studentData StudentData    @relation(fields: [studentDataId], references: [id])
-
-  @@unique([dataAssignmentId, studentDataId])
-  @@index([studentDataId])
+enum LeadInterviewStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
 }
 
-model Notification {
-  id String @id @default(uuid()) @db.Uuid
-
-  title   String
-  message String
-
-  type NotificationType
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  recipients NotificationRecipient[]
+enum LeadInterviewResult {
+  PENDING
+  PASSED
+  FAILED
+  ON_HOLD
 }
 
-model NotificationRecipient {
-  id String @id @default(uuid()) @db.Uuid
-
-  notificationId String @db.Uuid
-  userId         String @db.Uuid
-
-  isRead Boolean   @default(false)
-  readAt DateTime?
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  notification Notification @relation(fields: [notificationId], references: [id])
-
-  user User @relation("NotificationRecipient", fields: [userId], references: [id])
-
-  @@unique([notificationId, userId])
-  @@index([notificationId])
-  @@index([userId])
+enum LeadPaymentType {
+  APPLICATION_FEE
+  ADMISSION_FEE
+  TUITION_FEE
+  REFUND
+  OTHER
 }
 
-model ActivityLog {
-  id String @id @default(uuid()) @db.Uuid
-
-  userId String @db.Uuid
-
-  activity ActivityType
-
-  entityType String
-  entityId   String
-
-  description String?
-
-  createdAt DateTime @default(now())
-
-  // Relationships
-  user User @relation("UserActivities", fields: [userId], references: [id])
-
-  @@index([userId])
-  @@index([entityType, entityId])
+enum LeadRefundStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PROCESSED
 }
 
-model Office {
-  id Int @id @default(autoincrement())
-
-  name String @unique
-
-  address String?
-
-  city  String?
-  state String?
-
-  isActive Boolean @default(true)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  attendance Attendance[]
-}
-
-model Attendance {
-  id String @id @default(uuid()) @db.Uuid
-
-  userId   String @db.Uuid
-  officeId Int
-
-  date DateTime @db.Date
-
-  checkIn  DateTime?
-  checkOut DateTime?
-
-  status AttendanceStatus
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relationships
-  user   User   @relation("UserAttendance", fields: [userId], references: [id])
-  office Office @relation(fields: [officeId], references: [id])
-
-  @@unique([userId, date])
-  @@index([officeId])
-}

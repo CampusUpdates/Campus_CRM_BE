@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -7,13 +8,18 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateUserDto } from 'src/users/dto/create-user.dto';
 import { ERROR_MESSAGES } from '../common/constants/error-message';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { randomBytes } from 'crypto';
 import * as argon2 from 'argon2';
+import { JwtService } from '@nestjs/jwt';
 import { USER_SAFE_SELECT } from 'src/common/constants/constants.user';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+  ) {}
 
   // Get all users
   async findAll() {
@@ -21,7 +27,8 @@ export class UsersService {
       select: USER_SAFE_SELECT,
     });
   }
-  //generate username
+
+  // Generate username
   private async generateUsername(
     firstName: string,
     lastName?: string,
@@ -45,11 +52,11 @@ export class UsersService {
     return username;
   }
 
-  //generate password
-
+  // Generate password
   private generateTemporaryPassword(): string {
     return randomBytes(8).toString('base64url');
   }
+
   // Create user
   async create(createUserDto: CreateUserDto) {
     // Duplicate Email / Phone Check
@@ -79,7 +86,6 @@ export class UsersService {
     }
 
     // Validate Team
-
     if (createUserDto.teamId) {
       const team = await this.prisma.team.findUnique({
         where: {
@@ -91,6 +97,7 @@ export class UsersService {
         throw new NotFoundException(ERROR_MESSAGES.TEAM_NOT_FOUND);
       }
     }
+
     // Generate Username
     const username = await this.generateUsername(
       createUserDto.firstName,
@@ -104,7 +111,7 @@ export class UsersService {
     const passwordHash = await argon2.hash(temporaryPassword);
 
     // Create User
-    await this.prisma.user.create({
+    const newUser = await this.prisma.user.create({
       data: {
         firstName: createUserDto.firstName,
         lastName: createUserDto.lastName,
@@ -118,23 +125,41 @@ export class UsersService {
         teamId: createUserDto.teamId,
       },
       select: {
-        username: true,
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        roleId: true,
       },
     });
-    // Return Created User
+
+    const temporaryToken = await this.jwtService.signAsync(
+      {
+        sub: newUser.id,
+        email: newUser.email,
+        username,
+        firstName: newUser.firstName,
+        lastName: newUser.lastName,
+        roleId: newUser.roleId,
+        type: 'temporary',
+      },
+      {
+        expiresIn: '24h',
+      },
+    );
 
     return {
+      id: newUser.id,
       username,
       temporaryPassword,
+      temporaryToken,
     };
   }
 
-  //find by id
+  // Find by ID
   async findOne(id: string) {
     const user = await this.prisma.user.findUnique({
-      where: {
-        id,
-      },
+      where: { id },
       select: USER_SAFE_SELECT,
     });
 
@@ -145,10 +170,102 @@ export class UsersService {
     return user;
   }
 
-  //update user
+  // Get Self Profile
+  async getProfile(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        role: true,
+        team: true,
+        manager: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        _count: {
+          select: {
+            createdLeads: true,
+            conductedInterviews: true,
+            attendance: true,
+          },
+        },
+      },
+    });
 
+    if (!user) {
+      throw new NotFoundException('User profile not found.');
+    }
+
+    const { passwordHash, ...result } = user;
+    return result;
+  }
+
+  // Update Self Profile (Restricted to HR / Super Admin)
+  async updateProfile(userId: string, dto: UpdateProfileDto) {
+    const existing = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { role: true },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('User not found.');
+    }
+
+    // Only HR or SUPER_ADMIN personnel are authorized to update profile details
+    if (existing.role.name !== 'HR' && existing.role.name !== 'SUPER_ADMIN') {
+      throw new ForbiddenException(
+        'Only HR personnel are authorized to edit profile details. Contact HR to update your information.',
+      );
+    }
+
+    if (dto.phone && dto.phone !== existing.phone) {
+      const duplicatePhone = await this.prisma.user.findUnique({
+        where: { phone: dto.phone },
+      });
+      if (duplicatePhone) {
+        throw new ConflictException(ERROR_MESSAGES.PHONE_ALREADY_EXISTS);
+      }
+    }
+
+    const updatedUser = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        phone: dto.phone,
+        alternatePhone: dto.alternatePhone,
+        dob: dto.dob ? new Date(dto.dob) : undefined,
+      },
+      include: {
+        role: true,
+        team: true,
+        manager: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        _count: {
+          select: {
+            createdLeads: true,
+            conductedInterviews: true,
+            attendance: true,
+          },
+        },
+      },
+    });
+
+    const { passwordHash, ...result } = updatedUser;
+    return result;
+  }
+
+  // Admin update user
   async update(id: string, updateUserDto: UpdateUserDto) {
-    // 1. Check user exists
     const user = await this.prisma.user.findUnique({
       where: { id },
     });
@@ -177,7 +294,6 @@ export class UsersService {
       }
     }
 
-    // 3. Validate role if provided
     if (updateUserDto.roleId !== undefined) {
       const role = await this.prisma.role.findUnique({
         where: { id: updateUserDto.roleId },
@@ -188,7 +304,6 @@ export class UsersService {
       }
     }
 
-    // 4. Validate team if provided
     if (updateUserDto.teamId !== undefined) {
       const team = await this.prisma.team.findUnique({
         where: { id: updateUserDto.teamId },
@@ -199,7 +314,6 @@ export class UsersService {
       }
     }
 
-    // 5. Update user
     const updatedUser = await this.prisma.user.update({
       where: { id },
       data: {
@@ -218,8 +332,7 @@ export class UsersService {
     return updatedUser;
   }
 
-  //deactivate user
-
+  // Deactivate user
   async deactivate(id: string) {
     const user = await this.prisma.user.findUnique({
       where: { id },
@@ -229,19 +342,16 @@ export class UsersService {
       throw new NotFoundException(ERROR_MESSAGES.USER_NOT_FOUND);
     }
 
-    const updatedUser = await this.prisma.user.update({
+    return this.prisma.user.update({
       where: { id },
       data: {
         status: 'INACTIVE',
       },
       select: USER_SAFE_SELECT,
     });
-
-    return updatedUser;
   }
 
-  //reactivate user
-
+  // Reactivate user
   async activate(id: string) {
     const user = await this.prisma.user.findUnique({
       where: { id },
@@ -251,14 +361,12 @@ export class UsersService {
       throw new NotFoundException(ERROR_MESSAGES.USER_NOT_FOUND);
     }
 
-    const updatedUser = await this.prisma.user.update({
+    return this.prisma.user.update({
       where: { id },
       data: {
         status: 'ACTIVE',
       },
       select: USER_SAFE_SELECT,
     });
-
-    return updatedUser;
   }
 }

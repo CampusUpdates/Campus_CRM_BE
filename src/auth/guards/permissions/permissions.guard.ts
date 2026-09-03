@@ -7,9 +7,9 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { Request } from 'express';
-import { JwtPayload } from '../../interfaces/authenticated-request.interface';
+import { AuthenticatedRequest } from '../../interfaces/authenticated-request.interface';
 import { PERMISSIONS_KEY } from 'src/permissions/permissions.decorator';
+import { PermissionScope } from '@prisma/client';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
@@ -24,14 +24,7 @@ export class PermissionsGuard implements CanActivate {
       [context.getHandler(), context.getClass()],
     );
 
-    // Route doesn't require a permission
-    if (!requiredPermissions || requiredPermissions.length === 0) {
-      return true;
-    }
-
-    const request = context
-      .switchToHttp()
-      .getRequest<Request & { user?: JwtPayload }>();
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const userPayload = request.user;
 
     if (!userPayload || !userPayload.sub) {
@@ -63,17 +56,16 @@ export class PermissionsGuard implements CanActivate {
       throw new ForbiddenException('User role is inactive or missing');
     }
 
-    const userPermissions = await this.prisma.rolePermission.findMany({
+    // Fetch all active permissions for user's role
+    const rolePermissions = await this.prisma.rolePermission.findMany({
       where: {
         roleId: dbUser.roleId,
         permission: {
-          name: {
-            in: requiredPermissions,
-          },
           isActive: true,
         },
       },
       select: {
+        scope: true,
         permission: {
           select: {
             name: true,
@@ -82,10 +74,31 @@ export class PermissionsGuard implements CanActivate {
       },
     });
 
-    const permissionNames = userPermissions.map((item) => item.permission.name);
+    const userPermissionsMap: Record<string, PermissionScope> = {};
+    for (const rp of rolePermissions) {
+      userPermissionsMap[rp.permission.name] = rp.scope;
+    }
 
-    const hasAllPermissions = requiredPermissions.every((permission) =>
-      permissionNames.includes(permission),
+    // Super Admin receives ALL scope for all system permissions
+    if (dbUser.role.name === 'SUPER_ADMIN') {
+      const allPermissions = await this.prisma.permission.findMany({
+        where: { isActive: true },
+        select: { name: true },
+      });
+      for (const p of allPermissions) {
+        userPermissionsMap[p.name] = PermissionScope.ALL;
+      }
+    }
+
+    request.userPermissions = userPermissionsMap;
+
+    // Route doesn't require specific permission
+    if (!requiredPermissions || requiredPermissions.length === 0) {
+      return true;
+    }
+
+    const hasAllPermissions = requiredPermissions.every(
+      (permission) => userPermissionsMap[permission] !== undefined,
     );
 
     if (!hasAllPermissions) {

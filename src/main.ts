@@ -4,8 +4,8 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 
 async function bootstrap() {
-  console.log("App starting with DATABASE_URL:", process.env.DATABASE_URL);
-  console.log("PORT:", process.env.PORT)
+  console.log('App starting with DATABASE_URL:', process.env.DATABASE_URL);
+  console.log('PORT:', process.env.PORT);
   const app = await NestFactory.create(AppModule);
   app.useGlobalPipes(
     new ValidationPipe({

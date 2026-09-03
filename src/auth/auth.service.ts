@@ -13,7 +13,7 @@ export class AuthService {
   ) {}
   //login
   async login(loginDto: LoginDto) {
-    console.log(loginDto);
+  
     const user = await this.prisma.user.findUnique({
       where: {
         username: loginDto.username,
@@ -44,9 +44,7 @@ export class AuthService {
         type: 'password-change',
       };
 
-      const passwordChangeToken = await this.jwtService.signAsync(payload, {
-        expiresIn: '10m',
-      });
+      const passwordChangeToken = await this.jwtService.signAsync(payload);
 
       return {
         requiresPasswordChange: true,

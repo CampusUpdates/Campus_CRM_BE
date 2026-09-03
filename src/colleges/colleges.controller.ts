@@ -14,13 +14,16 @@ import { CollegesService } from './colleges.service';
 import { CreateCollegeDto } from './dto/create-college.dto';
 import { UpdateCollegeDto } from './dto/update-college.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
+import { PermissionsGuard } from 'src/auth/guards/permissions/permissions.guard';
+import { RequirePermission } from 'src/permissions/permissions.decorator';
 import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
 
 @Controller('colleges')
 export class CollegesController {
-  constructor(private readonly collegesService: CollegesService) {}
+  constructor(private readonly collegesService: CollegesService) { }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_MANAGE')
   @Post()
   create(@Body() createCollegeDto: CreateCollegeDto) {
     return this.collegesService.create(createCollegeDto);
@@ -35,7 +38,13 @@ export class CollegesController {
     @Query('state') state?: string,
     @Query('city') city?: string,
   ) {
-    return this.collegesService.findAll({ search, isActive, hasTieUp, state, city });
+    return this.collegesService.findAll({
+      search,
+      isActive,
+      hasTieUp,
+      state,
+      city,
+    });
   }
 
   @UseGuards(JwtAuthGuard)
@@ -44,27 +53,25 @@ export class CollegesController {
     return this.collegesService.findOne(id);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_MANAGE')
   @Patch(':id')
-  update(
-    @Param('id') id: string,
-    @Body() updateCollegeDto: UpdateCollegeDto,
-  ) {
+  update(@Param('id') id: string, @Body() updateCollegeDto: UpdateCollegeDto) {
     return this.collegesService.update(id, updateCollegeDto);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_MANAGE')
   @Patch(':id/approve')
-  approve(
-    @Param('id') id: string,
-    @Req() req: AuthenticatedRequest,
-  ) {
+  approve(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     return this.collegesService.approve(id, req.user.sub);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_MANAGE')
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.collegesService.remove(id);
   }
 }
+

@@ -59,3 +59,10 @@ node_modules
 /generated/prisma
 
 /generated/prisma
+
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# Runtime uploaded files
+/uploads/*

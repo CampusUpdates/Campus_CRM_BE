@@ -13,14 +13,23 @@ import {
 import { LeadsService } from './leads.service';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
+import { UpdateLeadPipelineDto } from './dto/update-lead-pipeline.dto';
+import { ApprovePitchDto } from './dto/approve-pitch.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
+import { PermissionsGuard } from 'src/auth/guards/permissions/permissions.guard';
+import { RequirePermission } from 'src/permissions/permissions.decorator';
 import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
+
+import { AssignLeadDto } from './dto/assign-lead.dto';
+import { BulkAssignLeadDto } from './dto/bulk-assign-lead.dto';
+import { CollegeStatus } from '@prisma/client';
 
 @Controller('leads')
 export class LeadsController {
   constructor(private readonly leadsService: LeadsService) {}
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_CREATE')
   @Post()
   create(
     @Body() createLeadDto: CreateLeadDto,
@@ -28,24 +37,123 @@ export class LeadsController {
   ) {
     return this.leadsService.create(createLeadDto, req.user.sub);
   }
-  @UseGuards(JwtAuthGuard)
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_VIEW')
+  @Get()
+  findAll(@Req() req: AuthenticatedRequest) {
+    const scope = req.userPermissions?.['LEAD_VIEW'] || 'OWN';
+    return this.leadsService.findAll(req.user, scope);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_VIEW')
+  @Get('assignable-count')
+  getAssignableLeadsCount(@Req() req: AuthenticatedRequest) {
+    return this.leadsService.getAssignableLeadsCount(req.user);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_SEARCH')
+  @Get('search')
+  searchByPhone(@Query('phone') phone: string) {
+    return this.leadsService.searchByPhone(phone);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_UPDATE')
+  @Post('bulk-assign')
+  assignBulkLeads(
+    @Body() bulkAssignDto: BulkAssignLeadDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.assignBulkLeads(bulkAssignDto, req.user);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_LEAD_APPROVE')
+  @Get('pitches/approvals')
+  getPitchApprovals(
+    @Query('status') status: CollegeStatus,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const scope = req.userPermissions?.['COLLEGE_LEAD_APPROVE'] || 'TEAM';
+    return this.leadsService.getPitchApprovals(req.user, scope, status);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_LEAD_APPROVE')
+  @Patch('pitches/:id/approval')
+  processPitchApproval(
+    @Param('id') pitchId: string,
+    @Body() approvePitchDto: ApprovePitchDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const scope = req.userPermissions?.['COLLEGE_LEAD_APPROVE'] || 'TEAM';
+    return this.leadsService.processPitchApproval(
+      pitchId,
+      approvePitchDto.status,
+      req.user,
+      scope,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_VIEW')
+  @Get(':id')
+  findOne(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    const scope = req.userPermissions?.['LEAD_VIEW'] || 'OWN';
+    return this.leadsService.findOne(id, req.user, scope);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_UPDATE')
+  @Patch(':id/pipeline')
+  updatePipeline(
+    @Param('id') id: string,
+    @Body() updateLeadPipelineDto: UpdateLeadPipelineDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const scope = req.userPermissions?.['LEAD_UPDATE'] || 'OWN';
+    return this.leadsService.updatePipeline(
+      id,
+      updateLeadPipelineDto,
+      req.user,
+      scope,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_UPDATE')
   @Patch(':id')
   update(
     @Param('id') id: string,
     @Body() updateLeadDto: UpdateLeadDto,
     @Req() req: AuthenticatedRequest,
   ) {
-    return this.leadsService.update(id, updateLeadDto, req.user.sub);
+    const scope = req.userPermissions?.['LEAD_UPDATE'] || 'OWN';
+    return this.leadsService.update(id, updateLeadDto, req.user, scope);
   }
-  //get lead by id
-  @UseGuards(JwtAuthGuard)
-  @Get(':id')
-  findOne(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
-    return this.leadsService.findOne(id, req.user.sub);
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_CLAIM')
+  @Post(':id/claim')
+  claim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    return this.leadsService.claim(id, req.user.sub);
   }
-  @UseGuards(JwtAuthGuard)
-  @Get('search')
-  searchByPhone(@Query('phone') phone: string) {
-    return this.leadsService.searchByPhone(phone);
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_UPDATE')
+  @Post(':id/assign')
+  assignLead(
+    @Param('id') id: string,
+    @Body() assignLeadDto: AssignLeadDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.assignLead(
+      id,
+      assignLeadDto.targetUserId,
+      req.user,
+    );
   }
 }

@@ -24,6 +24,10 @@ import { LeadStatusModule } from './lead-status/lead-status.module';
 import { PositionsModule } from './positions/positions.module';
 import { CommonModule } from './common/common.module';
 import { PermissionsModule } from './permissions/permissions.module';
+import { ReportsModule } from './reports/reports.module';
+import { InteractionsModule } from './interactions/interactions.module';
+import { TodosModule } from './todos/todos.module';
+import { CallsModule } from './calls/calls.module';
 
 @Module({
   imports: [
@@ -39,6 +43,8 @@ import { PermissionsModule } from './permissions/permissions.module';
     CompetitorsModule,
     LeadsModule,
     TpcModule,
+    InteractionsModule,
+    TodosModule,
     CandidatesModule,
     InterviewsModule,
     UploadsModule,
@@ -52,8 +58,11 @@ import { PermissionsModule } from './permissions/permissions.module';
     PositionsModule,
     CommonModule,
     PermissionsModule,
+    ReportsModule,
+    CallsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
 })
 export class AppModule {}
+

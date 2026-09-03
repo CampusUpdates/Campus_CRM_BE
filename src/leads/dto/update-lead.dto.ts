@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsEmail,
   IsEnum,
   IsNumber,
@@ -11,6 +12,10 @@ import {
 import { CourseType, Gender } from '@prisma/client';
 
 export class UpdateLeadDto {
+  @IsOptional()
+  @IsNumber()
+  statusId?: number;
+
   @IsOptional()
   @IsString()
   firstName?: string;
@@ -73,4 +78,10 @@ export class UpdateLeadDto {
   @IsOptional()
   @IsString()
   specializationInterested?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  collegeIds?: string[];
 }
+

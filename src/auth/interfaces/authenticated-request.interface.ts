@@ -1,4 +1,5 @@
 import { Request } from 'express';
+import { PermissionScope } from '@prisma/client';
 
 export interface JwtPayload {
   sub: string;
@@ -11,6 +12,9 @@ export interface JwtPayload {
   type: string;
 }
 
+export type UserPermissionsMap = Record<string, PermissionScope>;
+
 export interface AuthenticatedRequest extends Request {
   user: JwtPayload;
+  userPermissions?: UserPermissionsMap;
 }

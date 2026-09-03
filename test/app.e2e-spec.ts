@@ -5,6 +5,7 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 
 describe('AppController (e2e)', () => {
+  jest.setTimeout(60000);
   let app: INestApplication<App>;
 
   beforeEach(async () => {

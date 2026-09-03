@@ -9,7 +9,7 @@ import { UpdateCollegeDto } from './dto/update-college.dto';
 
 @Injectable()
 export class CollegesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async create(createCollegeDto: CreateCollegeDto) {
     const existingCollege = await this.prisma.college.findUnique({
