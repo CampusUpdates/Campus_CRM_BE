@@ -1,11 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { NotificationsService } from 'src/notifications/notifications.service';
 import { AssignTpcDto } from './dto/assign-tpc.dto';
 import { UpdateTpcStatusDto } from './dto/update-tpc-status.dto';
 
 @Injectable()
 export class TpcService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+  ) { }
 
   async assignTpc(dto: AssignTpcDto, assignedById: string) {
     const lead = await this.prisma.lead.findUnique({
@@ -62,6 +66,27 @@ export class TpcService {
             description: `Assigned TPC call for lead ${lead.firstName} to ${idsToAssign.length} user(s)`,
           },
         });
+
+        const assigner = await tx.user.findUnique({
+          where: { id: assignedById },
+          select: { firstName: true, lastName: true },
+        });
+        const assignerName = assigner
+          ? [assigner.firstName, assigner.lastName].filter(Boolean).join(' ')
+          : 'Manager';
+        const leadName = [lead.firstName, lead.lastName]
+          .filter(Boolean)
+          .join(' ');
+
+        await this.notificationsService.createNotification(
+          {
+            title: 'New TPC Assigned',
+            message: `${assignerName} assigned you a TPC for ${leadName}.`,
+            type: 'TPC',
+            recipientUserIds: idsToAssign,
+          },
+          tx,
+        );
       }
 
       // Return refreshed TPC with assignments

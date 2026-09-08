@@ -61,50 +61,53 @@ model Team {
 }
 
 model User {
-  id                        String                  @id @default(uuid()) @db.Uuid
-  firstName                 String
-  lastName                  String?
-  email                     String                  @unique
-  phone                     String                  @unique
-  alternatePhone            String?
-  dob                       DateTime?               @db.Date
-  passwordHash              String
-  username                  String                  @unique
-  mustChangePassword        Boolean                 @default(true)
-  status                    UserStatus              @default(ACTIVE)
-  roleId                    Int
-  teamId                    Int?
-  managerId                 String?                 @db.Uuid
-  createdAt                 DateTime                @default(now())
-  updatedAt                 DateTime                @updatedAt
-  activities                ActivityLog[]           @relation("UserActivities")
-  uploadedAttachments       Attachment[]            @relation("AttachmentUploader")
-  attendance                Attendance[]            @relation("UserAttendance")
-  approvedColleges          College[]               @relation("CollegeApprover")
-  createdDataAssignments    DataAssignment[]        @relation("StudentDataAssigner")
-  assignedDataAssignments   DataAssignment[]        @relation("StudentDataAssignee")
-  dataUploads               DataUpload[]            @relation("DataUploader")
-  createdInteractions       Interaction[]           @relation("InteractionCreator")
-  conductedInterviews       Interview[]             @relation("CandidateInterviewer")
-  createdLeads              Lead[]                  @relation("LeadCreator")
-  leadAssignments           LeadAssignment[]
-  pitchedLeadApplications   LeadCollege[]           @relation("LeadCollegePitcher")
-  processedLeadApplications LeadCollege[]           @relation("LeadCollegeApprover")
-  notifications             NotificationRecipient[] @relation("NotificationRecipient")
-  tpcAssignmentsCreated     TPCUser[]               @relation("TPCAssignedBy")
-  tpcAssignmentsReceived    TPCUser[]               @relation("TPCAssignedTo")
-  tpcAssignmentsCompleted   TPCUser[]               @relation("TPCCompletedBy")
-  teamsManaged              Team[]                  @relation("TeamManager")
-  todos                     Todo[]                  @relation("UserTodos")
-  conductedLeadInterviews   LeadCollegeInterview[]  @relation("LeadInterviewCoordinator")
-  issuedSelectionLetters    SelectionLetter[]       @relation("SelectionLetterIssuer")
-  processedLeadPayments     LeadCollegePayment[]    @relation("LeadPaymentProcessor")
-  changedLeadCollegeHistories LeadCollegeHistory[]  @relation("LeadHistoryChanger")
-  manager                   User?                   @relation("UserManager", fields: [managerId], references: [id])
-
-  subordinates              User[]                  @relation("UserManager")
-  role                      Role                    @relation(fields: [roleId], references: [id])
-  team                      Team?                   @relation("TeamMembers", fields: [teamId], references: [id])
+  id                          String                  @id @default(uuid()) @db.Uuid
+  firstName                   String
+  lastName                    String?
+  email                       String                  @unique
+  phone                       String                  @unique
+  alternatePhone              String?
+  dob                         DateTime?               @db.Date
+  passwordHash                String
+  username                    String                  @unique
+  mustChangePassword          Boolean                 @default(true)
+  status                      UserStatus              @default(ACTIVE)
+  roleId                      Int
+  teamId                      Int?
+  managerId                   String?                 @db.Uuid
+  createdAt                   DateTime                @default(now())
+  updatedAt                   DateTime                @updatedAt
+  activities                  ActivityLog[]           @relation("UserActivities")
+  uploadedAttachments         Attachment[]            @relation("AttachmentUploader")
+  attendance                  Attendance[]            @relation("UserAttendance")
+  approvedColleges            College[]               @relation("CollegeApprover")
+  createdDataAssignments      DataAssignment[]        @relation("StudentDataAssigner")
+  assignedDataAssignments     DataAssignment[]        @relation("StudentDataAssignee")
+  dataUploads                 DataUpload[]            @relation("DataUploader")
+  createdInteractions         Interaction[]           @relation("InteractionCreator")
+  conductedInterviews         Interview[]             @relation("CandidateInterviewer")
+  createdLeads                Lead[]                  @relation("LeadCreator")
+  leadAssignments             LeadAssignment[]
+  processedClaimRequests      LeadClaimRequest[]      @relation("ClaimProcessor")
+  createdClaimRequests        LeadClaimRequest[]      @relation("ClaimRequester")
+  pitchedLeadApplications     LeadCollege[]           @relation("LeadCollegePitcher")
+  processedLeadApplications   LeadCollege[]           @relation("LeadCollegeApprover")
+  changedLeadCollegeHistories LeadCollegeHistory[]    @relation("LeadHistoryChanger")
+  processedLeadPayments       LeadCollegePayment[]    @relation("LeadPaymentProcessor")
+  changedLeadOwnerships       LeadOwnershipHistory[]  @relation("LeadOwnershipChanger")
+  newLeadOwnerships           LeadOwnershipHistory[]  @relation("LeadNewOwner")
+  previousLeadOwnerships      LeadOwnershipHistory[]  @relation("LeadPreviousOwner")
+  notifications               NotificationRecipient[] @relation("NotificationRecipient")
+  issuedSelectionLetters      SelectionLetter[]       @relation("SelectionLetterIssuer")
+  tpcAssignmentsCreated       TPCUser[]               @relation("TPCAssignedBy")
+  tpcAssignmentsReceived      TPCUser[]               @relation("TPCAssignedTo")
+  tpcAssignmentsCompleted     TPCUser[]               @relation("TPCCompletedBy")
+  teamsManaged                Team[]                  @relation("TeamManager")
+  todos                       Todo[]                  @relation("UserTodos")
+  manager                     User?                   @relation("UserManager", fields: [managerId], references: [id])
+  subordinates                User[]                  @relation("UserManager")
+  role                        Role                    @relation(fields: [roleId], references: [id])
+  team                        Team?                   @relation("TeamMembers", fields: [teamId], references: [id])
 }
 
 model Course {
@@ -130,62 +133,60 @@ model CollegeCompetitor {
 }
 
 model College {
-  id               String              @id @default(uuid()) @db.Uuid
-  name             String              @unique
-  description      String
-  contactPerson    String?
-  phone            String?
-  email            String?
-  website          String?
-  address          String?
-  city             String?
-  state            String?
-  admissionProcess String?
-  hasTieUp         Boolean             @default(false)
-  requiresApproval Boolean             @default(false)
-  approvedById     String?             @db.Uuid
-  approvedAt       DateTime            @default(now())
-  isActive         Boolean             @default(false)
-  createdAt        DateTime            @default(now())
-  updatedAt        DateTime            @updatedAt
-  approvedBy       User?               @relation("CollegeApprover", fields: [approvedById], references: [id])
-  competitors      CollegeCompetitor[] @relation("PrimaryCollege")
-  competesWith     CollegeCompetitor[] @relation("CompetitorCollege")
-  courses          Course[]
-  leadApplications LeadCollege[]
-  finalEnrolledLeads Lead[]            @relation("FinalCollege")
+  id                 String              @id @default(uuid()) @db.Uuid
+  name               String              @unique
+  description        String
+  contactPerson      String?
+  phone              String?
+  email              String?
+  website            String?
+  address            String?
+  city               String?
+  state              String?
+  admissionProcess   String?
+  hasTieUp           Boolean             @default(false)
+  approvedById       String?             @db.Uuid
+  approvedAt         DateTime            @default(now())
+  isActive           Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  requiresApproval   Boolean             @default(false)
+  approvedBy         User?               @relation("CollegeApprover", fields: [approvedById], references: [id])
+  competitors        CollegeCompetitor[] @relation("PrimaryCollege")
+  competesWith       CollegeCompetitor[] @relation("CompetitorCollege")
+  courses            Course[]
+  finalEnrolledLeads Lead[]              @relation("FinalCollege")
+  leadApplications   LeadCollege[]
 
   @@index([approvedById])
-
 }
 
 model LeadStatus {
-  id           Int           @id @default(autoincrement())
-  name         String        @unique
-  description  String
-  displayOrder Int           @unique
-  color        String
-  isActive     Boolean       @default(true)
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  leads              Lead[]
-  leadCollege        LeadCollege[]
-  historyFromStatus  LeadCollegeHistory[] @relation("LeadHistoryFromStatus")
-  historyToStatus    LeadCollegeHistory[] @relation("LeadHistoryToStatus")
+  id                Int                  @id @default(autoincrement())
+  name              String               @unique
+  description       String
+  displayOrder      Int                  @unique
+  color             String
+  isActive          Boolean              @default(true)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  leads             Lead[]
+  leadCollege       LeadCollege[]
+  historyFromStatus LeadCollegeHistory[] @relation("LeadHistoryFromStatus")
+  historyToStatus   LeadCollegeHistory[] @relation("LeadHistoryToStatus")
 }
 
-
 model Lead {
-  id                       String           @id @default(uuid()) @db.Uuid
+  id                       String                 @id @default(uuid()) @db.Uuid
   statusId                 Int
-  createdById              String           @db.Uuid
+  createdById              String                 @db.Uuid
   firstName                String
   lastName                 String?
   phone                    String
   alternatePhone           String?
   email                    String?
   gender                   Gender?
-  dateOfBirth              DateTime?        @db.Date
+  dateOfBirth              DateTime?              @db.Date
   city                     String?
   state                    String?
   tenthPercentage          Float?
@@ -197,21 +198,22 @@ model Lead {
   specializationInterested String?
   passingYear              Int?
   source                   LeadSource
-  finalCollegeId           String?          @db.Uuid
-  createdAt                DateTime         @default(now())
-  updatedAt                DateTime         @updatedAt
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  finalCollegeId           String?                @db.Uuid
   interactions             Interaction[]
-  createdBy                User             @relation("LeadCreator", fields: [createdById], references: [id])
-  status                   LeadStatus       @relation(fields: [statusId], references: [id])
-  finalCollege             College?         @relation("FinalCollege", fields: [finalCollegeId], references: [id], onDelete: SetNull)
+  createdBy                User                   @relation("LeadCreator", fields: [createdById], references: [id])
+  finalCollege             College?               @relation("FinalCollege", fields: [finalCollegeId], references: [id])
+  status                   LeadStatus             @relation(fields: [statusId], references: [id])
   assignments              LeadAssignment[]
+  claimRequests            LeadClaimRequest[]
   collegeApplications      LeadCollege[]
+  ownershipHistories       LeadOwnershipHistory[]
   tpcs                     TPC[]
 
   @@index([statusId])
   @@index([createdById])
   @@index([finalCollegeId])
-
 }
 
 model LeadAssignment {
@@ -236,24 +238,24 @@ model LeadCollege {
   pitchedById           String                 @db.Uuid
   processedById         String?                @db.Uuid
   approvalStatus        CollegeStatus          @default(APPROVED)
-  applicationId         String?
-  coursePitched         String?
-  specializationPitched String?
-  feePitched            Decimal?               @db.Decimal(10, 2)
-  isCancelled           Boolean                @default(false)
-  cancelledAt           DateTime?
-  cancellationReason    String?
   createdAt             DateTime               @default(now())
   updatedAt             DateTime               @updatedAt
+  applicationId         String?
+  cancellationReason    String?
+  cancelledAt           DateTime?
+  coursePitched         String?
+  feePitched            Decimal?               @db.Decimal(10, 2)
+  isCancelled           Boolean                @default(false)
+  specializationPitched String?
   college               College                @relation(fields: [collegeId], references: [id])
   lead                  Lead                   @relation(fields: [leadId], references: [id])
   pitchedBy             User                   @relation("LeadCollegePitcher", fields: [pitchedById], references: [id])
   processedBy           User?                  @relation("LeadCollegeApprover", fields: [processedById], references: [id])
   status                LeadStatus             @relation(fields: [statusId], references: [id])
-  interviews            LeadCollegeInterview[]
-  selectionLetters      SelectionLetter[]
-  payments              LeadCollegePayment[]
   history               LeadCollegeHistory[]
+  interviews            LeadCollegeInterview[]
+  payments              LeadCollegePayment[]
+  selectionLetters      SelectionLetter[]
 
   @@unique([leadId, collegeId])
   @@index([leadId])
@@ -263,7 +265,6 @@ model LeadCollege {
   @@index([processedById])
   @@index([applicationId])
 }
-
 
 model Interaction {
   id          String       @id @default(uuid()) @db.Uuid
@@ -415,9 +416,9 @@ model DataAssignment {
   assignedById String               @db.Uuid
   assignedAt   DateTime             @default(now())
   expiresAt    DateTime
-  reclaimedAt  DateTime?
   status       DataAssignmentStatus @default(ACTIVE)
   createdAt    DateTime             @default(now())
+  reclaimedAt  DateTime?
   assignedBy   User                 @relation("StudentDataAssigner", fields: [assignedById], references: [id])
   assignedTo   User                 @relation("StudentDataAssignee", fields: [assignedToId], references: [id])
   items        DataAssignmentItem[]
@@ -518,6 +519,128 @@ model Todo {
 
   @@index([userId])
   @@index([dueDate])
+}
+
+model LeadCollegeInterview {
+  id                String                 @id @default(uuid()) @db.Uuid
+  leadCollegeId     String                 @db.Uuid
+  scheduledAt       DateTime
+  conductedAt       DateTime?
+  status            LeadInterviewStatus    @default(SCHEDULED)
+  result            LeadInterviewResult    @default(PENDING)
+  feedback          String?
+  meetingLink       String?
+  rescheduledFromId String?                @db.Uuid
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  leadCollege       LeadCollege            @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  rescheduledFrom   LeadCollegeInterview?  @relation("RescheduledInterviews", fields: [rescheduledFromId], references: [id])
+  rescheduledTo     LeadCollegeInterview[] @relation("RescheduledInterviews")
+
+  @@index([leadCollegeId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@index([rescheduledFromId])
+}
+
+model SelectionLetter {
+  id                String      @id @default(uuid()) @db.Uuid
+  leadCollegeId     String      @db.Uuid
+  letterUrl         String?
+  issuedAt          DateTime
+  admissionLastDate DateTime
+  issuedById        String?     @db.Uuid
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  issuedBy          User?       @relation("SelectionLetterIssuer", fields: [issuedById], references: [id])
+  leadCollege       LeadCollege @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+
+  @@index([leadCollegeId])
+  @@index([issuedAt])
+  @@index([admissionLastDate])
+  @@index([issuedById])
+}
+
+model LeadCollegePayment {
+  id              String               @id @default(uuid()) @db.Uuid
+  leadCollegeId   String               @db.Uuid
+  type            LeadPaymentType
+  amount          Decimal              @db.Decimal(10, 2)
+  transactionRef  String?
+  paymentMode     String?
+  paidAt          DateTime             @default(now())
+  remarks         String?
+  processedById   String?              @db.Uuid
+  parentPaymentId String?              @db.Uuid
+  refundStatus    LeadRefundStatus?
+  createdAt       DateTime             @default(now())
+  leadCollege     LeadCollege          @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  parentPayment   LeadCollegePayment?  @relation("PaymentRefunds", fields: [parentPaymentId], references: [id])
+  refunds         LeadCollegePayment[] @relation("PaymentRefunds")
+  processedBy     User?                @relation("LeadPaymentProcessor", fields: [processedById], references: [id])
+
+  @@index([leadCollegeId])
+  @@index([paidAt])
+  @@index([type])
+  @@index([parentPaymentId])
+  @@index([refundStatus])
+  @@index([processedById])
+}
+
+model LeadCollegeHistory {
+  id            String      @id @default(uuid()) @db.Uuid
+  leadCollegeId String      @db.Uuid
+  fromStatusId  Int?
+  toStatusId    Int
+  changedById   String?     @db.Uuid
+  remarks       String?
+  createdAt     DateTime    @default(now())
+  changedBy     User?       @relation("LeadHistoryChanger", fields: [changedById], references: [id])
+  fromStatus    LeadStatus? @relation("LeadHistoryFromStatus", fields: [fromStatusId], references: [id])
+  leadCollege   LeadCollege @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
+  toStatus      LeadStatus  @relation("LeadHistoryToStatus", fields: [toStatusId], references: [id])
+
+  @@index([leadCollegeId])
+  @@index([createdAt])
+  @@index([fromStatusId])
+  @@index([toStatusId])
+  @@index([changedById])
+}
+
+model LeadClaimRequest {
+  id            String             @id @default(uuid()) @db.Uuid
+  leadId        String             @db.Uuid
+  requestedAt   DateTime           @default(now())
+  status        ClaimRequestStatus @default(PENDING)
+  remarks       String?
+  processedAt   DateTime?
+  processedById String?            @db.Uuid
+  requestedById String             @db.Uuid
+  lead          Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  processedBy   User?              @relation("ClaimProcessor", fields: [processedById], references: [id])
+  requestedBy   User               @relation("ClaimRequester", fields: [requestedById], references: [id])
+
+  @@index([leadId])
+  @@index([requestedById])
+  @@index([status])
+}
+
+model LeadOwnershipHistory {
+  id              String                @id @default(uuid()) @db.Uuid
+  leadId          String                @db.Uuid
+  previousOwnerId String?               @db.Uuid
+  newOwnerId      String                @db.Uuid
+  changedById     String                @db.Uuid
+  reason          OwnershipChangeReason
+  createdAt       DateTime              @default(now())
+  changedBy       User                  @relation("LeadOwnershipChanger", fields: [changedById], references: [id], onDelete: Cascade)
+  lead            Lead                  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  newOwner        User                  @relation("LeadNewOwner", fields: [newOwnerId], references: [id], onDelete: Cascade)
+  previousOwner   User?                 @relation("LeadPreviousOwner", fields: [previousOwnerId], references: [id])
+
+  @@index([leadId])
+  @@index([newOwnerId])
+  @@index([createdAt])
 }
 
 enum UserStatus {
@@ -649,95 +772,6 @@ enum PermissionScope {
   ALL
 }
 
-model LeadCollegeInterview {
-  id                String               @id @default(uuid()) @db.Uuid
-  leadCollegeId     String               @db.Uuid
-  interviewerId     String?              @db.Uuid
-  scheduledAt       DateTime
-  conductedAt       DateTime?
-  status            LeadInterviewStatus  @default(SCHEDULED)
-  result            LeadInterviewResult  @default(PENDING)
-  feedback          String?
-  meetingLink       String?
-  rescheduledFromId String?              @db.Uuid
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  leadCollege       LeadCollege          @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
-  interviewer       User?                @relation("LeadInterviewCoordinator", fields: [interviewerId], references: [id], onDelete: SetNull)
-  rescheduledFrom   LeadCollegeInterview? @relation("RescheduledInterviews", fields: [rescheduledFromId], references: [id], onDelete: SetNull)
-  rescheduledTo     LeadCollegeInterview[] @relation("RescheduledInterviews")
-
-  @@index([leadCollegeId])
-  @@index([scheduledAt])
-  @@index([status])
-  @@index([rescheduledFromId])
-  @@index([interviewerId])
-}
-
-model SelectionLetter {
-  id                String      @id @default(uuid()) @db.Uuid
-  leadCollegeId     String      @db.Uuid
-  letterUrl         String?
-  issuedAt          DateTime
-  admissionLastDate DateTime
-  issuedById        String?     @db.Uuid
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
-  leadCollege       LeadCollege @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
-  issuedBy          User?       @relation("SelectionLetterIssuer", fields: [issuedById], references: [id], onDelete: SetNull)
-
-  @@index([leadCollegeId])
-  @@index([issuedAt])
-  @@index([admissionLastDate])
-  @@index([issuedById])
-}
-
-model LeadCollegePayment {
-  id              String             @id @default(uuid()) @db.Uuid
-  leadCollegeId   String             @db.Uuid
-  type            LeadPaymentType
-  amount          Decimal            @db.Decimal(10, 2)
-  transactionRef  String?
-  paymentMode     String?
-  paidAt          DateTime           @default(now())
-  remarks         String?
-  processedById   String?            @db.Uuid
-  parentPaymentId String?            @db.Uuid
-  refundStatus    LeadRefundStatus?
-  createdAt       DateTime           @default(now())
-  leadCollege     LeadCollege        @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
-  processedBy     User?              @relation("LeadPaymentProcessor", fields: [processedById], references: [id], onDelete: SetNull)
-  parentPayment   LeadCollegePayment? @relation("PaymentRefunds", fields: [parentPaymentId], references: [id], onDelete: SetNull)
-  refunds         LeadCollegePayment[] @relation("PaymentRefunds")
-
-  @@index([leadCollegeId])
-  @@index([paidAt])
-  @@index([type])
-  @@index([parentPaymentId])
-  @@index([refundStatus])
-  @@index([processedById])
-}
-
-model LeadCollegeHistory {
-  id            String      @id @default(uuid()) @db.Uuid
-  leadCollegeId String      @db.Uuid
-  fromStatusId  Int?
-  toStatusId    Int
-  changedById   String?     @db.Uuid
-  remarks       String?
-  createdAt     DateTime    @default(now())
-  leadCollege   LeadCollege @relation(fields: [leadCollegeId], references: [id], onDelete: Cascade)
-  fromStatus    LeadStatus? @relation("LeadHistoryFromStatus", fields: [fromStatusId], references: [id], onDelete: SetNull)
-  toStatus      LeadStatus  @relation("LeadHistoryToStatus", fields: [toStatusId], references: [id], onDelete: Restrict)
-  changedBy     User?       @relation("LeadHistoryChanger", fields: [changedById], references: [id], onDelete: SetNull)
-
-  @@index([leadCollegeId])
-  @@index([createdAt])
-  @@index([fromStatusId])
-  @@index([toStatusId])
-  @@index([changedById])
-}
-
 enum LeadInterviewStatus {
   SCHEDULED
   COMPLETED
@@ -767,3 +801,14 @@ enum LeadRefundStatus {
   PROCESSED
 }
 
+enum ClaimRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum OwnershipChangeReason {
+  INITIAL_ASSIGNMENT
+  CLAIM_APPROVED
+  ADMIN_REASSIGNMENT
+}

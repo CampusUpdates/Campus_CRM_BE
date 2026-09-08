@@ -22,11 +22,13 @@ import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-req
 
 import { AssignLeadDto } from './dto/assign-lead.dto';
 import { BulkAssignLeadDto } from './dto/bulk-assign-lead.dto';
+import { ProcessClaimRequestDto } from './dto/process-claim-request.dto';
+import { QueryClaimRequestDto } from './dto/query-claim-request.dto';
 import { CollegeStatus } from '@prisma/client';
 
 @Controller('leads')
 export class LeadsController {
-  constructor(private readonly leadsService: LeadsService) {}
+  constructor(private readonly leadsService: LeadsService) { }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('LEAD_CREATE')
@@ -98,6 +100,34 @@ export class LeadsController {
     );
   }
 
+  @UseGuards(JwtAuthGuard)
+  @Get('claim-requests')
+  getClaimRequests(
+    @Query() query: QueryClaimRequestDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.getClaimRequests(req.user.sub, query);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('claim-requests/:requestId')
+  processClaimRequest(
+    @Param('requestId') requestId: string,
+    @Body() dto: ProcessClaimRequestDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.processClaimRequest(requestId, req.user.sub, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/profile')
+  getLead360Profile(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.getLead360Profile(id, req.user.sub);
+  }
+
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('LEAD_VIEW')
   @Get(':id')
@@ -140,6 +170,16 @@ export class LeadsController {
   @Post(':id/claim')
   claim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     return this.leadsService.claim(id, req.user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('LEAD_CLAIM')
+  @Post(':id/claim-request')
+  createClaimRequest(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.createClaimRequest(id, req.user.sub);
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)

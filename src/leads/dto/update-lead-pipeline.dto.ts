@@ -13,10 +13,6 @@ export class InterviewScheduleDto {
   @IsOptional()
   @IsString()
   scheduledAt?: string;
-
-  @IsOptional()
-  @IsString()
-  interviewerId?: string;
 }
 
 export class InterviewResultDto {

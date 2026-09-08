@@ -52,29 +52,40 @@ export class PrismaService
         $allModels: {
           async $allOperations({ model, operation, args, query }) {
             let result;
-            try {
-              result = await query(args);
-            } catch (err: any) {
-              const errCode = err?.code;
-              const errMsg = err?.message || '';
-              if (
-                errCode !== 'P2028' &&
-                !errMsg.includes('Transaction') &&
-                (errCode === 'P1001' ||
-                  errCode === 'P1002' ||
-                  errMsg.includes("Can't reach database server") ||
-                  errMsg.includes('Connection reset') ||
-                  errMsg.includes('EMAXCONNSESSION') ||
-                  errMsg.includes('max clients'))
-              ) {
-                console.warn(
-                  `[PrismaService] Transient DB connection pool saturation/drop (${errCode || 'pool'}). Retrying operation in 200ms...`,
-                );
-                await new Promise((res) => setTimeout(res, 200));
-                await self.$connect().catch(() => {});
+            let attempts = 0;
+            const maxAttempts = 5;
+            while (attempts < maxAttempts) {
+              try {
                 result = await query(args);
-              } else {
-                throw err;
+                break;
+              } catch (err: any) {
+                attempts++;
+                const errCode = err?.code;
+                const errMsg = err?.message || '';
+                const isTransient =
+                  errCode !== 'P2028' &&
+                  !errMsg.includes('Transaction') &&
+                  (errCode === 'P1001' ||
+                    errCode === 'P1002' ||
+                    errCode === 'P1003' ||
+                    errCode === 'P1017' ||
+                    errMsg.includes("Can't reach database server") ||
+                    errMsg.includes('Connection reset') ||
+                    errMsg.includes('Closed connection') ||
+                    errMsg.includes('EMAXCONNSESSION') ||
+                    errMsg.includes('max clients') ||
+                    errMsg.includes('timeout') ||
+                    errMsg.includes('EngineTerminatedError'));
+
+                if (isTransient && attempts < maxAttempts) {
+                  console.warn(
+                    `[PrismaService] Transient DB connection pool glitch (${errCode || 'pool'}, attempt ${attempts}/${maxAttempts}). Retrying in backoff...`,
+                  );
+                  const jitter = Math.floor(Math.random() * 150);
+                  await new Promise((res) => setTimeout(res, 400 * attempts + jitter));
+                } else {
+                  throw err;
+                }
               }
             }
 
@@ -163,10 +174,11 @@ export class PrismaService
   }
 
   async onModuleInit() {
-    let retries = 5;
+    let retries = 10;
     while (retries > 0) {
       try {
         await this.$connect();
+        console.log('[PrismaService] Successfully connected to database.');
         break;
       } catch (error) {
         retries--;
@@ -175,7 +187,7 @@ export class PrismaService
           (error as Error)?.message || error,
         );
         if (retries === 0) throw error;
-        await new Promise((res) => setTimeout(res, 2000));
+        await new Promise((res) => setTimeout(res, 3000));
       }
     }
   }

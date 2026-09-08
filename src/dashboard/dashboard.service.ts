@@ -6,9 +6,79 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 
+export interface AdmissionsDashboardFilters {
+  startDate?: string;
+  endDate?: string;
+  collegeId?: string;
+  course?: string;
+  teamId?: string;
+  employeeId?: string;
+  source?: string;
+  statusId?: string;
+  page?: number;
+  limit?: number;
+}
+
 @Injectable()
 export class DashboardService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
+
+  private metadataCache: {
+    timestamp: number;
+    data: {
+      colleges: any[];
+      courses: any[];
+      teams: any[];
+      employees: any[];
+      leadStatuses: any[];
+    };
+  } | null = null;
+
+  private async getDashboardMetadata() {
+    const CACHE_TTL_MS = 5 * 60 * 1000;
+    const now = Date.now();
+    if (this.metadataCache && now - this.metadataCache.timestamp < CACHE_TTL_MS) {
+      return this.metadataCache.data;
+    }
+
+    const [colleges, courses, teams, employees, leadStatuses] = await Promise.all([
+      this.prisma.college.findMany({
+        select: { id: true, name: true, city: true, state: true },
+        orderBy: { name: 'asc' },
+      }),
+      this.prisma.course.findMany({
+        select: { id: true, name: true, collegeId: true },
+        orderBy: { name: 'asc' },
+      }),
+      this.prisma.team.findMany({
+        select: {
+          id: true,
+          name: true,
+          manager: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: { name: 'asc' },
+      }),
+      this.prisma.user.findMany({
+        where: { status: 'ACTIVE' },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          teamId: true,
+          team: { select: { name: true } },
+        },
+        orderBy: { firstName: 'asc' },
+      }),
+      this.prisma.leadStatus.findMany({
+        where: { isActive: true },
+        orderBy: { displayOrder: 'asc' },
+      }),
+    ]);
+
+    const data = { colleges, courses, teams, employees, leadStatuses };
+    this.metadataCache = { timestamp: now, data };
+    return data;
+  }
 
   private async verifyUserRole(userId?: string, allowedRoles: string[] = []) {
     if (!userId) return;
@@ -393,6 +463,9 @@ export class DashboardService {
     teamIdParam?: string,
     startDateStr?: string,
     endDateStr?: string,
+    pipelinePeriod?: string,
+    tpcPeriod?: string,
+    memberPeriod?: string,
   ) {
     const callingUser = await this.verifyUserRole(userId, ['MANAGER', 'SUPER_ADMIN']);
     const isSuperAdminUser = callingUser?.role?.name?.toUpperCase().includes('SUPER_ADMIN');
@@ -404,6 +477,7 @@ export class DashboardService {
         id: true,
         name: true,
         description: true,
+        managerId: true,
       },
       orderBy: {
         name: 'asc',
@@ -428,30 +502,36 @@ export class DashboardService {
       targetTeamIds = managedTeams.map((t) => t.id);
     }
 
-    // 2. Fetch team members belonging to accessible target teams
+    // 2. Fetch team members belonging to accessible target teams (including Manager/Head of Team)
+    const targetTeams = managedTeams.filter((t) => targetTeamIds.includes(t.id));
+    const targetManagerIds = targetTeams.map((t) => t.managerId).filter(Boolean);
+
     const teamMembers =
       targetTeamIds.length > 0
         ? await this.prisma.user.findMany({
-            where: {
-              teamId: { in: targetTeamIds },
-              status: 'ACTIVE',
-            },
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              teamId: true,
-              team: {
-                select: {
-                  name: true,
-                },
+          where: {
+            OR: [
+              { teamId: { in: targetTeamIds } },
+              { id: { in: targetManagerIds } },
+            ],
+            status: 'ACTIVE',
+          },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            teamId: true,
+            team: {
+              select: {
+                name: true,
               },
             },
-            orderBy: {
-              firstName: 'asc',
-            },
-          })
+          },
+          orderBy: {
+            firstName: 'asc',
+          },
+        })
         : [];
 
     const memberIds = teamMembers.map((m) => m.id);
@@ -479,7 +559,7 @@ export class DashboardService {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    const [allLeadStatuses, assignedLeads, pendingPitches, todaysApplications] = await Promise.all([
+    const [allLeadStatuses, assignedLeads, pendingPitches, todaysApplicationsPitches] = await Promise.all([
       // Lead statuses
       this.prisma.leadStatus.findMany({
         where: { isActive: true },
@@ -522,18 +602,21 @@ export class DashboardService {
         },
       }),
 
-      // Today's applications pitched by team members
+      // Today's applications pitched by team members (unique student pitches)
       memberIds.length > 0
-        ? this.prisma.leadCollege.count({
-            where: {
-              pitchedById: { in: memberIds },
-              createdAt: {
-                gte: startOfToday,
-                lte: endOfToday,
-              },
+        ? this.prisma.leadCollege.findMany({
+          where: {
+            pitchedById: { in: memberIds },
+            createdAt: {
+              gte: startOfToday,
+              lte: endOfToday,
             },
-          })
-        : 0,
+          },
+          select: {
+            leadId: true,
+          },
+        })
+        : [],
     ]);
 
     const [tpcAssignments, interactions, activityLogs] = await Promise.all([
@@ -543,11 +626,11 @@ export class DashboardService {
           assignedToId: { in: memberIds },
           ...(startDate || endDate
             ? {
-                assignedAt: {
-                  ...(startDate && { gte: startDate }),
-                  ...(endDate && { lte: endDate }),
-                },
-              }
+              assignedAt: {
+                ...(startDate && { gte: startDate }),
+                ...(endDate && { lte: endDate }),
+              },
+            }
             : {}),
         },
         include: {
@@ -570,11 +653,11 @@ export class DashboardService {
           createdById: { in: memberIds },
           ...(startDate || endDate
             ? {
-                createdAt: {
-                  ...(startDate && { gte: startDate }),
-                  ...(endDate && { lte: endDate }),
-                },
-              }
+              createdAt: {
+                ...(startDate && { gte: startDate }),
+                ...(endDate && { lte: endDate }),
+              },
+            }
             : {}),
         },
         include: {
@@ -595,11 +678,11 @@ export class DashboardService {
           userId: { in: memberIds },
           ...(startDate || endDate
             ? {
-                createdAt: {
-                  ...(startDate && { gte: startDate }),
-                  ...(endDate && { lte: endDate }),
-                },
-              }
+              createdAt: {
+                ...(startDate && { gte: startDate }),
+                ...(endDate && { lte: endDate }),
+              },
+            }
             : {}),
         },
         include: {
@@ -612,7 +695,7 @@ export class DashboardService {
       }),
     ]);
 
-    const [todayAttendance, notifications, leadsTodayRecords] = await Promise.all([
+    const [todayAttendance, notifications, leadsTodayRecords, allTeamLeads] = await Promise.all([
       // Attendance records for today
       this.prisma.attendance.findMany({
         where: {
@@ -637,40 +720,63 @@ export class DashboardService {
       // Leads created/posted today by team members or assigned to team members today
       memberIds.length > 0
         ? this.prisma.lead.findMany({
-            where: {
-              OR: [
-                { createdById: { in: memberIds } },
-                { assignments: { some: { userId: { in: memberIds } } } },
-              ],
-              createdAt: {
-                gte: startOfToday,
-                lte: endOfToday,
-              },
+          where: {
+            OR: [
+              { createdById: { in: memberIds } },
+              { assignments: { some: { userId: { in: memberIds } } } },
+            ],
+            createdAt: {
+              gte: startOfToday,
+              lte: endOfToday,
             },
-            include: {
-              status: true,
-              createdBy: {
-                select: { id: true, firstName: true, lastName: true, email: true },
-              },
-              assignments: {
-                where: { status: 'ACTIVE' },
-                include: {
-                  user: {
-                    select: { id: true, firstName: true, lastName: true },
-                  },
+          },
+          include: {
+            status: true,
+            createdBy: {
+              select: { id: true, firstName: true, lastName: true, email: true },
+            },
+            assignments: {
+              where: { status: 'ACTIVE' },
+              include: {
+                user: {
+                  select: { id: true, firstName: true, lastName: true },
                 },
               },
             },
-            orderBy: { createdAt: 'desc' },
-          })
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+        : [],
+
+      // All team leads (created by or assigned to team members + manager)
+      memberIds.length > 0
+        ? this.prisma.lead.findMany({
+          where: {
+            OR: [
+              { createdById: { in: memberIds } },
+              { assignments: { some: { userId: { in: memberIds } } } },
+            ],
+          },
+          include: {
+            status: true,
+            interactions: {
+              select: { id: true, createdAt: true },
+            },
+          },
+        })
         : [],
     ]);
 
-    // 5. Deduplicate unique leads
-    const leadMap = new Map<string, (typeof assignedLeads)[0]['lead']>();
+    // 5. Deduplicate unique team leads (Manager + Team Members)
+    const leadMap = new Map<string, any>();
     for (const assignment of assignedLeads) {
       if (assignment.lead && !leadMap.has(assignment.lead.id)) {
         leadMap.set(assignment.lead.id, assignment.lead);
+      }
+    }
+    for (const leadRec of allTeamLeads) {
+      if (!leadMap.has(leadRec.id)) {
+        leadMap.set(leadRec.id, leadRec);
       }
     }
     const uniqueLeads = Array.from(leadMap.values());
@@ -704,7 +810,21 @@ export class DashboardService {
     const pendingActions = pendingTpcsCount + pendingPitchesCount;
 
     // Calculate the 4 manager dashboard overview metrics
-    const leadsToday = leadsTodayList.length;
+    const uniqueLeadsTodayMap = new Map<string, (typeof leadsTodayRecords)[0]>();
+    for (const record of leadsTodayRecords) {
+      if (!uniqueLeadsTodayMap.has(record.id)) {
+        uniqueLeadsTodayMap.set(record.id, record);
+      }
+    }
+    const uniqueLeadsTodayList = Array.from(uniqueLeadsTodayMap.values());
+    const leadsToday = uniqueLeadsTodayList.length;
+
+    // Today's Applications: UNIQUE STUDENTS with application activity today
+    const todaysApplications = new Set(
+      Array.isArray(todaysApplicationsPitches)
+        ? todaysApplicationsPitches.map((p) => p.leadId)
+        : [],
+    ).size;
 
     const monthlyConversions = uniqueLeads.filter((l) => {
       if (l.status?.name !== 'ADMISSION_DONE') return false;
@@ -722,26 +842,49 @@ export class DashboardService {
       ongoingProcessStatuses.includes(l.status?.name || ''),
     ).length;
 
-    // 7. Team Performance Comparison
+    const letterOutToday = uniqueLeads.filter((l) => {
+      const sName = (l.status?.name || '').toUpperCase();
+      if (sName !== 'LETTER_OUT') return false;
+      const cDate = new Date(l.createdAt).toDateString();
+      const uDate = new Date(l.updatedAt || l.createdAt).toDateString();
+      const todayDate = new Date().toDateString();
+      return cDate === todayDate || uDate === todayDate;
+    }).length;
+
+    const interviewScheduledToday = uniqueLeads.filter((l) => {
+      const sName = (l.status?.name || '').toUpperCase();
+      if (sName !== 'INTERVIEW_SCHEDULED') return false;
+      const cDate = new Date(l.createdAt).toDateString();
+      const uDate = new Date(l.updatedAt || l.createdAt).toDateString();
+      const todayDate = new Date().toDateString();
+      return cDate === todayDate || uDate === todayDate;
+    }).length;
+
+    // 7. Team Performance Comparison (Manager is included as a member of their team)
     const teamPerformance = managedTeams
       .filter((t) => targetTeamIds.includes(t.id))
       .map((team) => {
-        const membersInTeam = teamMembers.filter((m) => m.teamId === team.id);
+        const membersInTeam = teamMembers.filter((m) => m.teamId === team.id || m.id === team.managerId);
         const memberIdsInTeam = membersInTeam.map((m) => m.id);
 
         const leadsInTeam = assignedLeads.filter((a) =>
           memberIdsInTeam.includes(a.userId),
         );
-        const uniqueLeadsInTeam = Array.from(
-          new Set(leadsInTeam.map((a) => a.leadId)),
-        );
+        // Unique leads/students in team
+        const uniqueLeadsInTeamMap = new Map<string, (typeof assignedLeads)[0]['lead']>();
+        for (const a of leadsInTeam) {
+          if (a.lead && !uniqueLeadsInTeamMap.has(a.leadId)) {
+            uniqueLeadsInTeamMap.set(a.leadId, a.lead);
+          }
+        }
+        const uniqueLeadsInTeam = Array.from(uniqueLeadsInTeamMap.values());
 
-        const contactedLeadsInTeam = leadsInTeam.filter(
-          (a) => a.lead.interactions.length > 0,
+        const contactedLeadsInTeam = uniqueLeadsInTeam.filter(
+          (l) => l.interactions && l.interactions.length > 0,
         ).length;
 
-        const convertedLeadsInTeam = leadsInTeam.filter(
-          (a) => a.lead.status?.name === 'ADMISSION_DONE',
+        const convertedLeadsInTeam = uniqueLeadsInTeam.filter(
+          (l) => l.status?.name === 'ADMISSION_DONE',
         ).length;
 
         const tpcsInTeam = tpcAssignments.filter((t) =>
@@ -763,65 +906,262 @@ export class DashboardService {
         };
       });
 
-    // 8. Lead Pipeline Breakdown
+    // 8. Lead Pipeline Breakdown (Period-filtered unique leads)
+    const now = new Date();
+    let pStartDate: Date | null = null;
+    let pEndDate: Date | null = null;
+
+    const requestedPipelinePeriod = (pipelinePeriod || 'today').toLowerCase();
+
+    if (requestedPipelinePeriod === 'today') {
+      pStartDate = new Date(now);
+      pStartDate.setHours(0, 0, 0, 0);
+      pEndDate = new Date(now);
+      pEndDate.setHours(23, 59, 59, 999);
+    } else if (requestedPipelinePeriod === 'week') {
+      pStartDate = new Date(now);
+      pStartDate.setDate(now.getDate() - 7);
+      pStartDate.setHours(0, 0, 0, 0);
+      pEndDate = new Date(now);
+      pEndDate.setHours(23, 59, 59, 999);
+    } else if (requestedPipelinePeriod === 'month') {
+      pStartDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      pStartDate.setHours(0, 0, 0, 0);
+      pEndDate = new Date(now);
+      pEndDate.setHours(23, 59, 59, 999);
+    }
+
+    let pipelineUniqueLeads = uniqueLeads;
+    if (pStartDate || pEndDate) {
+      pipelineUniqueLeads = uniqueLeads.filter((l) => {
+        const cDate = new Date(l.createdAt);
+        const uDate = new Date(l.updatedAt);
+        if (pStartDate && cDate < pStartDate && uDate < pStartDate) return false;
+        if (pEndDate && cDate > pEndDate && uDate > pEndDate) return false;
+        return true;
+      });
+    }
+
+    const totalPipelineLeads = pipelineUniqueLeads.length;
+
     const leadPipeline = allLeadStatuses.map((st) => {
-      const count = uniqueLeads.filter((l) => l.statusId === st.id).length;
+      const count = pipelineUniqueLeads.filter((l) => l.statusId === st.id).length;
       return {
         id: st.id,
         name: st.name,
         color: st.color,
         description: st.description,
         count,
-        percentage: totalLeads > 0 ? Math.round((count / totalLeads) * 100) : 0,
+        percentage: totalPipelineLeads > 0 ? Math.round((count / totalPipelineLeads) * 100) : 0,
       };
     });
 
-    // 9. Member Performance & Distribution
-    const memberPerformance = teamMembers.map((member) => {
-      const memberAssignments = assignedLeads.filter((a) => a.userId === member.id);
-      const assignedLeadsCount = memberAssignments.length;
-      const contactedLeadsCount = memberAssignments.filter(
-        (a) => a.lead.interactions.length > 0,
-      ).length;
-      const convertedLeadsCount = memberAssignments.filter(
-        (a) => a.lead.status?.name === 'ADMISSION_DONE',
-      ).length;
+    // 9. Member Performance & Distribution (Period filtered)
+    const requestedMemberPeriod = (memberPeriod || 'today').toLowerCase();
+    let mStartDate: Date | null = null;
+    let mEndDate: Date | null = null;
 
-      const memberTpcs = tpcAssignments.filter((t) => t.assignedToId === member.id);
-      const memberInteractions = interactions.filter((i) => i.createdById === member.id);
-      const memberLogs = activityLogs.filter((a) => a.userId === member.id);
+    if (requestedMemberPeriod === 'today') {
+      mStartDate = new Date(now);
+      mStartDate.setHours(0, 0, 0, 0);
+      mEndDate = new Date(now);
+      mEndDate.setHours(23, 59, 59, 999);
+    } else if (requestedMemberPeriod === 'week') {
+      mStartDate = new Date(now);
+      mStartDate.setDate(now.getDate() - 7);
+      mStartDate.setHours(0, 0, 0, 0);
+      mEndDate = new Date(now);
+      mEndDate.setHours(23, 59, 59, 999);
+    } else if (requestedMemberPeriod === 'month') {
+      mStartDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      mStartDate.setHours(0, 0, 0, 0);
+      mEndDate = new Date(now);
+      mEndDate.setHours(23, 59, 59, 999);
+    }
+
+    const rawMemberPerformance = teamMembers.map((member) => {
+      // Collect leads assigned to or created by this member (including manager)
+      const memberLeadItems: any[] = [];
+      for (const a of assignedLeads) {
+        if (a.userId === member.id && a.lead) {
+          memberLeadItems.push({ lead: a.lead, timestamp: a.assignedAt || a.createdAt });
+        }
+      }
+      for (const l of allTeamLeads) {
+        if (l.createdById === member.id) {
+          memberLeadItems.push({ lead: l, timestamp: l.createdAt });
+        }
+      }
+
+      // Filter leads by date range if specified
+      const filteredMemberLeads = memberLeadItems.filter((item) => {
+        if (!mStartDate || !mEndDate) return true;
+        const cDate = new Date(item.lead.createdAt);
+        const uDate = new Date(item.lead.updatedAt || item.lead.createdAt);
+        const tDate = new Date(item.timestamp);
+        return (
+          (cDate >= mStartDate && cDate <= mEndDate) ||
+          (uDate >= mStartDate && uDate <= mEndDate) ||
+          (tDate >= mStartDate && tDate <= mEndDate)
+        );
+      });
+
+      // Deduplicate unique student/lead records (1 student = 1 count)
+      const uniqueMemberLeadsMap = new Map<string, any>();
+      for (const item of filteredMemberLeads) {
+        if (item.lead && !uniqueMemberLeadsMap.has(item.lead.id)) {
+          uniqueMemberLeadsMap.set(item.lead.id, item.lead);
+        }
+      }
+      const uniqueMemberLeads = Array.from(uniqueMemberLeadsMap.values());
+
+      const assignedLeadsCount = uniqueMemberLeads.length;
+
+      // Conversions: unique leads that reached ADMISSION_DONE status
+      const convertedLeadsCount = uniqueMemberLeads.filter((l) => {
+        if (l.status?.name !== 'ADMISSION_DONE') return false;
+        if (!mStartDate || !mEndDate) return true;
+        const uDate = new Date(l.updatedAt || l.createdAt);
+        return uDate >= mStartDate && uDate <= mEndDate;
+      }).length;
+
+      // TPC Assigned & TPC Attempted for member in memberPeriod
+      const memberTpcsAll = tpcAssignments.filter((t) => t.assignedToId === member.id);
+      const filteredMemberTpcs = memberTpcsAll.filter((t) => {
+        if (!mStartDate || !mEndDate) return true;
+        const tDate = new Date(t.assignedAt || t.createdAt);
+        return tDate >= mStartDate && tDate <= mEndDate;
+      });
+
+      const tpcAssignedCount = filteredMemberTpcs.length;
+
+      // TPC Attempted: TPCs where action was taken / attempted (status !== PENDING)
+      const tpcAttemptedCount = filteredMemberTpcs.filter((t) => {
+        if (t.status === 'PENDING') return false;
+        if (!mStartDate || !mEndDate) return true;
+        const actionDate = new Date(t.completedAt || t.assignedAt || t.createdAt);
+        return actionDate >= mStartDate && actionDate <= mEndDate;
+      }).length;
+
+      const pendingTpcsCount = filteredMemberTpcs.filter((t) => t.status === 'PENDING').length;
+
+      // Interactions / Total Calls logged in memberPeriod
+      const memberInteractions = interactions.filter((i) => {
+        if (i.createdById !== member.id) return false;
+        if (!mStartDate || !mEndDate) return true;
+        const iDate = new Date(i.createdAt);
+        return iDate >= mStartDate && iDate <= mEndDate;
+      });
+
+      const totalCallsCount = memberInteractions.length;
+
+      // Member activity logs in memberPeriod
+      const memberLogs = activityLogs.filter((a) => {
+        if (a.userId !== member.id) return false;
+        if (!mStartDate || !mEndDate) return true;
+        const aDate = new Date(a.createdAt);
+        return aDate >= mStartDate && aDate <= mEndDate;
+      });
 
       const timestamps = [
         ...memberInteractions.map((i) => new Date(i.createdAt).getTime()),
         ...memberLogs.map((l) => new Date(l.createdAt).getTime()),
       ];
-      const lastActivityAt =
-        timestamps.length > 0
-          ? new Date(Math.max(...timestamps)).toISOString()
-          : null;
+
+      let lastActivityAt: string | null = null;
+      if (timestamps.length > 0) {
+        lastActivityAt = new Date(Math.max(...timestamps)).toISOString();
+      } else {
+        // Fallback to overall latest activity timestamp if no activity in period
+        const overallInteractions = interactions.filter((i) => i.createdById === member.id);
+        const overallLogs = activityLogs.filter((a) => a.userId === member.id);
+        const overallTimestamps = [
+          ...overallInteractions.map((i) => new Date(i.createdAt).getTime()),
+          ...overallLogs.map((l) => new Date(l.createdAt).getTime()),
+        ];
+        if (overallTimestamps.length > 0) {
+          lastActivityAt = new Date(Math.max(...overallTimestamps)).toISOString();
+        }
+      }
+
+      const memberTeamName =
+        member.team?.name ||
+        managedTeams.find((t) => t.managerId === member.id)?.name ||
+        'Unassigned';
+
+      // DONE indicator: Member completed activity (has calls or attempted TPCs or assigned leads, and no pending TPCs)
+      const isDone =
+        (totalCallsCount > 0 || tpcAttemptedCount > 0 || assignedLeadsCount > 0) &&
+        pendingTpcsCount === 0;
 
       return {
         id: member.id,
         firstName: member.firstName,
         lastName: member.lastName,
         email: member.email,
-        teamName: member.team?.name || 'Unassigned',
+        teamName: memberTeamName,
         assignedLeadsCount,
-        contactedLeadsCount,
         convertedLeadsCount,
-        tpcsCount: memberTpcs.length,
-        interactionsCount: memberInteractions.length,
+        tpcAssignedCount,
+        tpcAttemptedCount,
+        tpcsCount: tpcAssignedCount,
+        totalCallsCount,
+        interactionsCount: totalCallsCount,
         lastActivityAt,
+        isDone,
       };
     });
 
-    // 10. TPC Overview (Enums: PENDING, COMPLETED, NO_REPLY, NOT_INTERESTED, CANCELLED)
+    // Default sorting: Highest LEADS first, then highest TOTAL CALLS, then member name ascending
+    const memberPerformance = [...rawMemberPerformance].sort((a, b) => {
+      if (b.assignedLeadsCount !== a.assignedLeadsCount) {
+        return b.assignedLeadsCount - a.assignedLeadsCount;
+      }
+      if (b.totalCallsCount !== a.totalCallsCount) {
+        return b.totalCallsCount - a.totalCallsCount;
+      }
+      return a.firstName.localeCompare(b.firstName);
+    });
+
+    // 10. TPC Overview (Period-filtered TPC record count)
+    const requestedTpcPeriod = (tpcPeriod || 'today').toLowerCase();
+    let tStartDate: Date | null = null;
+    let tEndDate: Date | null = null;
+
+    if (requestedTpcPeriod === 'today') {
+      tStartDate = new Date(now);
+      tStartDate.setHours(0, 0, 0, 0);
+      tEndDate = new Date(now);
+      tEndDate.setHours(23, 59, 59, 999);
+    } else if (requestedTpcPeriod === 'week') {
+      tStartDate = new Date(now);
+      tStartDate.setDate(now.getDate() - 7);
+      tStartDate.setHours(0, 0, 0, 0);
+      tEndDate = new Date(now);
+      tEndDate.setHours(23, 59, 59, 999);
+    } else if (requestedTpcPeriod === 'month') {
+      tStartDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      tStartDate.setHours(0, 0, 0, 0);
+      tEndDate = new Date(now);
+      tEndDate.setHours(23, 59, 59, 999);
+    }
+
+    let filteredTpcAssignments = tpcAssignments;
+    if (tStartDate || tEndDate) {
+      filteredTpcAssignments = tpcAssignments.filter((t) => {
+        const assignedDate = new Date(t.assignedAt);
+        if (tStartDate && assignedDate < tStartDate) return false;
+        if (tEndDate && assignedDate > tEndDate) return false;
+        return true;
+      });
+    }
+
     const tpcStatusCounts = {
-      PENDING: tpcAssignments.filter((t) => t.status === 'PENDING').length,
-      COMPLETED: tpcAssignments.filter((t) => t.status === 'COMPLETED').length,
-      NO_REPLY: tpcAssignments.filter((t) => t.status === 'NO_REPLY').length,
-      NOT_INTERESTED: tpcAssignments.filter((t) => t.status === 'NOT_INTERESTED').length,
-      CANCELLED: tpcAssignments.filter((t) => t.status === 'CANCELLED').length,
+      PENDING: filteredTpcAssignments.filter((t) => t.status === 'PENDING').length,
+      COMPLETED: filteredTpcAssignments.filter((t) => t.status === 'COMPLETED').length,
+      NO_REPLY: filteredTpcAssignments.filter((t) => t.status === 'NO_REPLY').length,
+      NOT_INTERESTED: filteredTpcAssignments.filter((t) => t.status === 'NOT_INTERESTED').length,
+      CANCELLED: filteredTpcAssignments.filter((t) => t.status === 'CANCELLED').length,
     };
 
     const tpcByMember = teamMembers.map((m) => {
@@ -908,6 +1248,8 @@ export class DashboardService {
         monthlyConversions,
         todaysApplications,
         ongoingProcesses,
+        letterOutToday,
+        interviewScheduledToday,
       },
       leadsTodayList,
       teamPerformance,
@@ -1572,6 +1914,642 @@ export class DashboardService {
         entityId: a.entityId,
         createdAt: a.createdAt.toISOString(),
       })),
+    };
+  }
+
+  async getAdmissionsDashboardStats(
+    userId?: string,
+    filters: AdmissionsDashboardFilters = {},
+  ) {
+    await this.verifyUserRole(userId, ['SUPER_ADMIN', 'PROGRAM_ADVISOR', 'MANAGER']);
+
+    const {
+      startDate,
+      endDate,
+      collegeId,
+      course,
+      teamId,
+      employeeId,
+      source,
+      statusId,
+      page = 1,
+      limit = 10,
+    } = filters;
+
+    // Build Prisma query conditions for Lead and LeadCollege
+    const whereLead: any = {};
+    const whereLeadCollege: any = {};
+
+    if (startDate || endDate) {
+      whereLead.createdAt = {};
+      whereLeadCollege.createdAt = {};
+      if (startDate) {
+        whereLead.createdAt.gte = new Date(startDate);
+        whereLeadCollege.createdAt.gte = new Date(startDate);
+      }
+      if (endDate) {
+        whereLead.createdAt.lte = new Date(endDate);
+        whereLeadCollege.createdAt.lte = new Date(endDate);
+      }
+    }
+
+    if (source) {
+      whereLead.source = source as any;
+      whereLeadCollege.lead = { ...whereLeadCollege.lead, source: source as any };
+    }
+
+    if (collegeId) {
+      whereLead.OR = [
+        { finalCollegeId: collegeId },
+        { collegeApplications: { some: { collegeId } } },
+      ];
+      whereLeadCollege.collegeId = collegeId;
+    }
+
+    if (course) {
+      whereLead.OR = [
+        ...(whereLead.OR || []),
+        { courseInterested: course as any },
+        { collegeApplications: { some: { coursePitched: course } } },
+      ];
+      whereLeadCollege.coursePitched = course;
+    }
+
+    if (statusId) {
+      const parsedStatusId = parseInt(statusId, 10);
+      whereLead.statusId = parsedStatusId;
+      whereLeadCollege.statusId = parsedStatusId;
+    }
+
+    if (teamId) {
+      const parsedTeamId = parseInt(teamId, 10);
+      whereLead.createdBy = { teamId: parsedTeamId };
+      whereLeadCollege.pitchedBy = { teamId: parsedTeamId };
+    }
+
+    if (employeeId) {
+      whereLead.createdById = employeeId;
+      whereLeadCollege.pitchedById = employeeId;
+    }
+
+    // Fetch master filter metadata (cached in memory)
+    const { colleges, courses, teams, employees, leadStatuses } =
+      await this.getDashboardMetadata();
+
+    // Fetch lead and leadCollege data using lean select queries (no heavy payments/nested arrays)
+    const [allLeads, allLeadColleges] = await Promise.all([
+      this.prisma.lead.findMany({
+        where: whereLead,
+        select: {
+          id: true,
+          createdAt: true,
+          updatedAt: true,
+          createdById: true,
+          statusId: true,
+          source: true,
+          state: true,
+          status: { select: { id: true, name: true } },
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              teamId: true,
+              team: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.leadCollege.findMany({
+        where: whereLeadCollege,
+        select: {
+          id: true,
+          leadId: true,
+          collegeId: true,
+          pitchedById: true,
+          statusId: true,
+          status: { select: { id: true, name: true } },
+          pitchedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              teamId: true,
+              team: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    // Admission identification logic
+    const isAdmissionStatus = (stName?: string) => {
+      if (!stName) return false;
+      const normalized = stName.toUpperCase();
+      return (
+        normalized === 'ADMISSION_DONE' || normalized.includes('ADMISSION')
+      );
+    };
+
+    // Filter leads and leadColleges that are admissions
+    const admissionLeads = allLeads.filter((l) =>
+      isAdmissionStatus(l.status?.name),
+    );
+    const admissionLeadColleges = allLeadColleges.filter((lc) =>
+      isAdmissionStatus(lc.status?.name),
+    );
+
+    // Combine distinct admissions count (by lead ID)
+    const admittedLeadIds = new Set<string>();
+    admissionLeads.forEach((l) => admittedLeadIds.add(l.id));
+    admissionLeadColleges.forEach((lc) => admittedLeadIds.add(lc.leadId));
+
+    const totalAdmissionsCount = admittedLeadIds.size;
+    const totalLeadsCount = allLeads.length;
+
+    // Current month admissions
+    const now = new Date();
+    const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const admissionsThisMonthCount = allLeads.filter(
+      (l) =>
+        isAdmissionStatus(l.status?.name) &&
+        new Date(l.updatedAt || l.createdAt) >= startOfCurrentMonth,
+    ).length;
+
+    // Counselor / Employee Performance Leaderboard
+    const employeeStatsMap = new Map<
+      string,
+      {
+        employeeId: string;
+        employeeName: string;
+        teamName: string;
+        leadsHandled: number;
+        admissions: number;
+        conversionRate: number;
+      }
+    >();
+
+    // Initialize map for all active employees
+    employees.forEach((emp) => {
+      employeeStatsMap.set(emp.id, {
+        employeeId: emp.id,
+        employeeName: `${emp.firstName} ${emp.lastName || ''}`.trim(),
+        teamName: emp.team?.name || 'Unassigned',
+        leadsHandled: 0,
+        admissions: 0,
+        conversionRate: 0,
+      });
+    });
+
+    // Populate leads handled and admissions per employee
+    allLeads.forEach((l) => {
+      const empId = l.createdById;
+      if (empId) {
+        const emp = employeeStatsMap.get(empId) || {
+          employeeId: empId,
+          employeeName: `${l.createdBy?.firstName || ''} ${l.createdBy?.lastName || ''}`.trim() || 'Unknown',
+          teamName: l.createdBy?.team?.name || 'Unassigned',
+          leadsHandled: 0,
+          admissions: 0,
+          conversionRate: 0,
+        };
+        emp.leadsHandled += 1;
+        if (isAdmissionStatus(l.status?.name)) {
+          emp.admissions += 1;
+        }
+        employeeStatsMap.set(empId, emp);
+      }
+    });
+
+    // Also include pitchedBy employees from LeadCollege applications
+    allLeadColleges.forEach((lc) => {
+      const empId = lc.pitchedById;
+      if (empId) {
+        const emp = employeeStatsMap.get(empId) || {
+          employeeId: empId,
+          employeeName: `${lc.pitchedBy?.firstName || ''} ${lc.pitchedBy?.lastName || ''}`.trim() || 'Unknown',
+          teamName: lc.pitchedBy?.team?.name || 'Unassigned',
+          leadsHandled: 0,
+          admissions: 0,
+          conversionRate: 0,
+        };
+        if (isAdmissionStatus(lc.status?.name)) {
+          emp.admissions += 1;
+        }
+        employeeStatsMap.set(empId, emp);
+      }
+    });
+
+    // Calculate conversion rates for employees
+    const employeePerformanceList = Array.from(employeeStatsMap.values())
+      .map((e) => ({
+        ...e,
+        conversionRate:
+          e.leadsHandled > 0
+            ? Math.round((e.admissions / e.leadsHandled) * 100)
+            : 0,
+      }))
+      .filter((e) => e.leadsHandled > 0 || e.admissions > 0)
+      .sort((a, b) => b.admissions - a.admissions);
+
+    // Top Counselor & Top Converter
+    const topCounselorObj = employeePerformanceList[0] || null;
+    const eligibleConverters = employeePerformanceList.filter(
+      (e) => e.leadsHandled >= 3,
+    );
+    eligibleConverters.sort((a, b) => b.conversionRate - a.conversionRate);
+    const topConverterObj = eligibleConverters[0] || topCounselorObj;
+
+    // Team Performance Breakdown
+    const teamStatsMap = new Map<
+      number,
+      {
+        teamId: number;
+        teamName: string;
+        managerName: string;
+        memberCount: number;
+        leadsHandled: number;
+        admissions: number;
+        conversionRate: number;
+      }
+    >();
+
+    teams.forEach((t) => {
+      const mgrName = t.manager
+        ? `${t.manager.firstName} ${t.manager.lastName || ''}`.trim()
+        : 'N/A';
+      const mCount = employees.filter((e) => e.teamId === t.id).length;
+      teamStatsMap.set(t.id, {
+        teamId: t.id,
+        teamName: t.name,
+        managerName: mgrName,
+        memberCount: mCount,
+        leadsHandled: 0,
+        admissions: 0,
+        conversionRate: 0,
+      });
+    });
+
+    allLeads.forEach((l) => {
+      const tId = l.createdBy?.teamId;
+      if (tId && teamStatsMap.has(tId)) {
+        const t = teamStatsMap.get(tId)!;
+        t.leadsHandled += 1;
+        if (isAdmissionStatus(l.status?.name)) {
+          t.admissions += 1;
+        }
+      }
+    });
+
+    const teamPerformanceList = Array.from(teamStatsMap.values()).map((t) => ({
+      ...t,
+      conversionRate:
+        t.leadsHandled > 0
+          ? Math.round((t.admissions / t.leadsHandled) * 100)
+          : 0,
+    }));
+
+    // Admission Trend (Last 6 Months)
+    const monthlyTrendMap = new Map<
+      string,
+      { month: string; leads: number; admissions: number }
+    >();
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = d.toLocaleString('default', {
+        month: 'short',
+        year: '2-digit',
+      });
+      monthlyTrendMap.set(key, { month: key, leads: 0, admissions: 0 });
+    }
+
+    allLeads.forEach((l) => {
+      const lDate = new Date(l.createdAt);
+      const key = lDate.toLocaleString('default', {
+        month: 'short',
+        year: '2-digit',
+      });
+      if (monthlyTrendMap.has(key)) {
+        const item = monthlyTrendMap.get(key)!;
+        item.leads += 1;
+        if (isAdmissionStatus(l.status?.name)) {
+          item.admissions += 1;
+        }
+      }
+    });
+
+    const admissionTrend = Array.from(monthlyTrendMap.values());
+
+    // Admissions by College
+    const collegeStatsMap = new Map<
+      string,
+      {
+        collegeId: string;
+        collegeName: string;
+        applications: number;
+        admissions: number;
+        conversionRate: number;
+      }
+    >();
+
+    colleges.forEach((c) => {
+      collegeStatsMap.set(c.id, {
+        collegeId: c.id,
+        collegeName: c.name,
+        applications: 0,
+        admissions: 0,
+        conversionRate: 0,
+      });
+    });
+
+    allLeadColleges.forEach((lc) => {
+      if (lc.collegeId && collegeStatsMap.has(lc.collegeId)) {
+        const col = collegeStatsMap.get(lc.collegeId)!;
+        col.applications += 1;
+        if (isAdmissionStatus(lc.status?.name)) {
+          col.admissions += 1;
+        }
+      }
+    });
+
+    const collegeDistribution = Array.from(collegeStatsMap.values())
+      .map((c) => ({
+        ...c,
+        conversionRate:
+          c.applications > 0
+            ? Math.round((c.admissions / c.applications) * 100)
+            : 0,
+      }))
+      .filter((c) => c.applications > 0 || c.admissions > 0)
+      .sort((a, b) => b.admissions - a.admissions);
+
+    // Admission Funnel (Lead Status Pipeline)
+    let prevCount = 0;
+    const admissionFunnel = leadStatuses.map((st, idx) => {
+      const count = allLeads.filter((l) => l.statusId === st.id).length;
+      let conversionFromPrevious = 100;
+      if (idx > 0 && prevCount > 0) {
+        conversionFromPrevious = Math.round((count / prevCount) * 100);
+      }
+      prevCount = count || prevCount;
+      return {
+        stageId: st.id,
+        stageName: st.description || st.name,
+        code: st.name,
+        displayOrder: st.displayOrder,
+        color: st.color,
+        count,
+        conversionFromPrevious,
+      };
+    });
+
+    // Source Conversion
+    const sourceStatsMap = new Map<
+      string,
+      {
+        source: string;
+        leads: number;
+        admissions: number;
+        conversionRate: number;
+      }
+    >();
+
+    const sourcesList = [
+      'WEBSITE',
+      'FACEBOOK',
+      'INSTAGRAM',
+      'GOOGLE',
+      'REFERRAL',
+      'DATA_UPLOAD',
+      'COLLEGE_EVENT',
+      'OTHER',
+    ];
+
+    sourcesList.forEach((src) => {
+      sourceStatsMap.set(src, {
+        source: src,
+        leads: 0,
+        admissions: 0,
+        conversionRate: 0,
+      });
+    });
+
+    allLeads.forEach((l) => {
+      const src = l.source || 'OTHER';
+      const item = sourceStatsMap.get(src) || {
+        source: src,
+        leads: 0,
+        admissions: 0,
+        conversionRate: 0,
+      };
+      item.leads += 1;
+      if (isAdmissionStatus(l.status?.name)) {
+        item.admissions += 1;
+      }
+      sourceStatsMap.set(src, item);
+    });
+
+    const sourceConversionList = Array.from(sourceStatsMap.values())
+      .map((s) => ({
+        ...s,
+        conversionRate:
+          s.leads > 0 ? Math.round((s.admissions / s.leads) * 100) : 0,
+      }))
+      .filter((s) => s.leads > 0);
+
+    // Geographic Distribution (State & City)
+    const stateStatsMap = new Map<
+      string,
+      { state: string; admissionsCount: number; totalLeads: number }
+    >();
+
+    allLeads.forEach((l) => {
+      const st = l.state?.trim() || 'Unknown State';
+      const item = stateStatsMap.get(st) || {
+        state: st,
+        admissionsCount: 0,
+        totalLeads: 0,
+      };
+      item.totalLeads += 1;
+      if (isAdmissionStatus(l.status?.name)) {
+        item.admissionsCount += 1;
+      }
+      stateStatsMap.set(st, item);
+    });
+
+    const geographicDistribution = Array.from(stateStatsMap.values()).sort(
+      (a, b) => b.admissionsCount - a.admissionsCount,
+    );
+
+    // Admission Status Distribution
+    const statusDistribution = leadStatuses.map((st) => {
+      const count = allLeads.filter((l) => l.statusId === st.id).length;
+      return {
+        statusId: st.id,
+        statusName: st.description || st.name,
+        code: st.name,
+        color: st.color,
+        count,
+        percentage:
+          totalLeadsCount > 0
+            ? Math.round((count / totalLeadsCount) * 100)
+            : 0,
+      };
+    });
+
+    // Recent Admissions (Database-level Paginated)
+    const whereRecentAdmissions: any = {
+      ...whereLeadCollege,
+      status: {
+        is: {
+          name: {
+            contains: 'ADMISSION',
+            mode: 'insensitive',
+          },
+        },
+      },
+    };
+
+    let totalRecentRecords = await this.prisma.leadCollege.count({
+      where: whereRecentAdmissions,
+    });
+
+    let recentWhereToUse = whereRecentAdmissions;
+    if (totalRecentRecords === 0) {
+      totalRecentRecords = await this.prisma.leadCollege.count({
+        where: whereLeadCollege,
+      });
+      recentWhereToUse = whereLeadCollege;
+    }
+
+    const totalPages = Math.ceil(totalRecentRecords / limit) || 1;
+    const skip = (page - 1) * limit;
+
+    const recentLeadColleges = await this.prisma.leadCollege.findMany({
+      where: recentWhereToUse,
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        leadId: true,
+        coursePitched: true,
+        feePitched: true,
+        createdAt: true,
+        updatedAt: true,
+        status: { select: { name: true, color: true } },
+        college: { select: { id: true, name: true, city: true, state: true } },
+        lead: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true,
+            city: true,
+            state: true,
+            source: true,
+          },
+        },
+        pitchedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            teamId: true,
+            team: { select: { name: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const recentAdmissionsData = recentLeadColleges.map((rc) => ({
+      id: rc.id,
+      leadId: rc.leadId,
+      studentName: `${rc.lead?.firstName || 'Student'} ${rc.lead?.lastName || ''}`.trim(),
+      phone: rc.lead?.phone || 'N/A',
+      email: rc.lead?.email || 'N/A',
+      city: rc.lead?.city || rc.college?.city || 'N/A',
+      state: rc.lead?.state || rc.college?.state || 'N/A',
+      collegeName: rc.college?.name || 'N/A',
+      coursePitched: rc.coursePitched || 'N/A',
+      feePitched: rc.feePitched ? Number(rc.feePitched) : 0,
+      counselorName: rc.pitchedBy
+        ? `${rc.pitchedBy.firstName} ${rc.pitchedBy.lastName || ''}`.trim()
+        : 'Unassigned',
+      teamName: rc.pitchedBy?.team?.name || 'Unassigned',
+      admissionDate: rc.updatedAt
+        ? rc.updatedAt.toISOString()
+        : rc.createdAt.toISOString(),
+      statusName: rc.status?.name || 'ADMISSION_DONE',
+      statusColor: rc.status?.color || 'green',
+      source: rc.lead?.source || 'OTHER',
+      createdAt: rc.createdAt.toISOString(),
+    }));
+
+    // Filter Options Metadata
+    const uniqueCourseNames = Array.from(
+      new Set(courses.map((c) => c.name)),
+    ).sort();
+
+    return {
+      kpis: {
+        totalAdmissions: totalAdmissionsCount,
+        admissionsThisMonth: admissionsThisMonthCount,
+        totalLeads: totalLeadsCount,
+        overallConversionRate:
+          totalLeadsCount > 0
+            ? Math.round((totalAdmissionsCount / totalLeadsCount) * 100)
+            : 0,
+        topCounselor: topCounselorObj
+          ? {
+            name: topCounselorObj.employeeName,
+            admissions: topCounselorObj.admissions,
+            team: topCounselorObj.teamName,
+          }
+          : null,
+        topConverter: topConverterObj
+          ? {
+            name: topConverterObj.employeeName,
+            conversionRate: topConverterObj.conversionRate,
+            team: topConverterObj.teamName,
+          }
+          : null,
+      },
+      filtersMeta: {
+        colleges: colleges.map((c) => ({ id: c.id, name: c.name })),
+        courses: uniqueCourseNames,
+        teams: teams.map((t) => ({ id: t.id, name: t.name })),
+        employees: employees.map((e) => ({
+          id: e.id,
+          name: `${e.firstName} ${e.lastName || ''}`.trim(),
+          teamId: e.teamId,
+        })),
+        sources: sourcesList,
+        statuses: leadStatuses.map((s) => ({
+          id: s.id,
+          name: s.description || s.name,
+          code: s.name,
+          color: s.color,
+        })),
+      },
+      admissionTrend,
+      collegeDistribution,
+      employeePerformance: employeePerformanceList,
+      teamPerformance: teamPerformanceList,
+      admissionFunnel,
+      sourceConversion: [],
+      geographicDistribution,
+      statusDistribution,
+      recentAdmissions: {
+        data: recentAdmissionsData,
+        total: totalRecentRecords,
+        page,
+        limit,
+        totalPages,
+      },
     };
   }
 }

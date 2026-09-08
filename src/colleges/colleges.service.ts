@@ -4,12 +4,16 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { NotificationsService } from 'src/notifications/notifications.service';
 import { CreateCollegeDto } from './dto/create-college.dto';
 import { UpdateCollegeDto } from './dto/update-college.dto';
 
 @Injectable()
 export class CollegesService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+  ) { }
 
   async create(createCollegeDto: CreateCollegeDto) {
     const existingCollege = await this.prisma.college.findUnique({
@@ -142,7 +146,7 @@ export class CollegesService {
       throw new NotFoundException('College not found');
     }
 
-    return this.prisma.college.update({
+    const updated = await this.prisma.college.update({
       where: { id },
       data: {
         isActive: true,
@@ -150,6 +154,15 @@ export class CollegesService {
         approvedAt: new Date(),
       },
     });
+
+    await this.notificationsService.createNotification({
+      title: 'College Approved',
+      message: `College ${college.name} has been approved.`,
+      type: 'SYSTEM',
+      recipientUserIds: [userId],
+    });
+
+    return updated;
   }
 
   async remove(id: string) {

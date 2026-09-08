@@ -4,13 +4,17 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 
 import { PrismaService } from 'src/prisma/prisma.service';
+import { NotificationsService } from 'src/notifications/notifications.service';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { UpdateLeadPipelineDto } from './dto/update-lead-pipeline.dto';
-import { CollegeStatus } from '@prisma/client';
+import { CollegeStatus, ClaimRequestStatus, OwnershipChangeReason } from '@prisma/client';
+import { ProcessClaimRequestDto } from './dto/process-claim-request.dto';
+import { QueryClaimRequestDto } from './dto/query-claim-request.dto';
 
 
 // CENTRALIZED SOURCE OF TRUTH FOR LEAD ASSIGNMENT ELIGIBILITY PREDICATE
@@ -32,7 +36,10 @@ export const buildAssignableLeadsWhere = (now: Date = new Date()) => ({
 
 @Injectable()
 export class LeadsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+  ) { }
 
   private async validateAndGetCollegePitches(tx: any, collegeIds: string[]) {
     const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -62,7 +69,7 @@ export class LeadsService {
   private validatePitchApproval(pitch: { approvalStatus: CollegeStatus }) {
     if (pitch.approvalStatus === CollegeStatus.PENDING) {
       throw new BadRequestException(
-        'This college pitch is awaiting manager approval. The pipeline cannot be changed until it is approved.',
+        'College pipeline cannot be changed until Manager approval is completed.',
       );
     }
     if (pitch.approvalStatus === CollegeStatus.REJECTED) {
@@ -149,23 +156,23 @@ export class LeadsService {
     return this.prisma.$transaction(async (tx) => {
       const lead = existingLead
         ? await tx.lead.update({
-            where: {
-              id: existingLead.id,
-            },
-            data: {
-              ...leadData,
-              ...(dateOfBirth && { dateOfBirth }),
-              statusId: targetStatusId,
-            },
-          })
+          where: {
+            id: existingLead.id,
+          },
+          data: {
+            ...leadData,
+            ...(dateOfBirth && { dateOfBirth }),
+            statusId: targetStatusId,
+          },
+        })
         : await tx.lead.create({
-            data: {
-              ...leadData,
-              ...(dateOfBirth && { dateOfBirth }),
-              statusId: targetStatusId,
-              createdById: userId,
-            },
-          });
+          data: {
+            ...leadData,
+            ...(dateOfBirth && { dateOfBirth }),
+            statusId: targetStatusId,
+            createdById: userId,
+          },
+        });
 
       if (collegeIds && collegeIds.length > 0) {
         const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -173,13 +180,13 @@ export class LeadsService {
 
         const creatorUser = tx.user
           ? await tx.user.findUnique({
-              where: { id: userId },
-              select: {
-                firstName: true,
-                lastName: true,
-                role: { select: { name: true } },
-              },
-            })
+            where: { id: userId },
+            select: {
+              firstName: true,
+              lastName: true,
+              role: { select: { name: true } },
+            },
+          })
           : null;
 
         const creatorRoleName = creatorUser?.role?.name ? creatorUser.role.name.toUpperCase() : '';
@@ -191,8 +198,8 @@ export class LeadsService {
             const approvalStatus = isExemptFromApproval
               ? CollegeStatus.APPROVED
               : college.requiresApproval
-              ? CollegeStatus.PENDING
-              : CollegeStatus.APPROVED;
+                ? CollegeStatus.PENDING
+                : CollegeStatus.APPROVED;
 
             return {
               leadId: lead.id,
@@ -253,6 +260,16 @@ export class LeadsService {
           assignedAt: now,
           expiresAt,
           status: 'ACTIVE',
+        },
+      });
+
+      await tx.leadOwnershipHistory.create({
+        data: {
+          leadId: lead.id,
+          previousOwnerId: null,
+          newOwnerId: userId,
+          changedById: userId,
+          reason: 'INITIAL_ASSIGNMENT',
         },
       });
 
@@ -532,13 +549,13 @@ export class LeadsService {
 
           const creatorUser = tx.user
             ? await tx.user.findUnique({
-                where: { id: user.sub },
-                select: {
-                  firstName: true,
-                  lastName: true,
-                  role: { select: { name: true } },
-                },
-              })
+              where: { id: user.sub },
+              select: {
+                firstName: true,
+                lastName: true,
+                role: { select: { name: true } },
+              },
+            })
             : null;
 
           const creatorRoleName = creatorUser?.role?.name ? creatorUser.role.name.toUpperCase() : '';
@@ -550,8 +567,8 @@ export class LeadsService {
               const approvalStatus = isExemptFromApproval
                 ? CollegeStatus.APPROVED
                 : college.requiresApproval
-                ? CollegeStatus.PENDING
-                : CollegeStatus.APPROVED;
+                  ? CollegeStatus.PENDING
+                  : CollegeStatus.APPROVED;
 
               return {
                 leadId,
@@ -1065,6 +1082,8 @@ export class LeadsService {
         }
       }
 
+      const previousOwnerId = lead.assignments[0]?.userId || lead.createdById;
+
       await tx.leadAssignment.updateMany({
         where: {
           leadId,
@@ -1088,6 +1107,16 @@ export class LeadsService {
         },
       });
 
+      await tx.leadOwnershipHistory.create({
+        data: {
+          leadId,
+          previousOwnerId: previousOwnerId || null,
+          newOwnerId: targetUserId,
+          changedById: managerUser.sub,
+          reason: 'ADMIN_REASSIGNMENT',
+        },
+      });
+
       await tx.activityLog.create({
         data: {
           userId: managerUser.sub,
@@ -1097,6 +1126,27 @@ export class LeadsService {
           description: `Lead manually assigned to user ${targetUserId}`,
         },
       });
+
+      const assigner = await tx.user.findUnique({
+        where: { id: managerUser.sub },
+        select: { firstName: true, lastName: true },
+      });
+      const assignerName = assigner
+        ? [assigner.firstName, assigner.lastName].filter(Boolean).join(' ')
+        : 'Manager';
+      const leadName = [lead.firstName, lead.lastName]
+        .filter(Boolean)
+        .join(' ');
+
+      await this.notificationsService.createNotification(
+        {
+          title: 'New Lead Assigned',
+          message: `${assignerName} assigned you a lead for calling: ${leadName}.`,
+          type: 'LEAD',
+          recipientUserIds: [targetUserId],
+        },
+        tx,
+      );
 
       return {
         message: 'Lead assigned successfully',
@@ -1203,6 +1253,8 @@ export class LeadsService {
           data: { status: 'EXPIRED' },
         });
 
+        const previousOwnerId = currentCheck.assignments[0]?.userId || currentCheck.createdById;
+
         const newAssignment = await tx.leadAssignment.create({
           data: {
             leadId: lead.id,
@@ -1210,6 +1262,16 @@ export class LeadsService {
             assignedAt: now,
             expiresAt,
             status: 'ACTIVE',
+          },
+        });
+
+        await tx.leadOwnershipHistory.create({
+          data: {
+            leadId: lead.id,
+            previousOwnerId: previousOwnerId || null,
+            newOwnerId: targetUserId,
+            changedById: managerUser.sub,
+            reason: 'ADMIN_REASSIGNMENT',
           },
         });
 
@@ -1225,6 +1287,26 @@ export class LeadsService {
           description: `Bulk assigned ${assignedResults.length} leads to user ${targetUserId}`,
         },
       });
+
+      if (assignedResults.length > 0) {
+        const assigner = await tx.user.findUnique({
+          where: { id: managerUser.sub },
+          select: { firstName: true, lastName: true },
+        });
+        const assignerName = assigner
+          ? [assigner.firstName, assigner.lastName].filter(Boolean).join(' ')
+          : 'Manager';
+
+        await this.notificationsService.createNotification(
+          {
+            title: 'New Lead Assigned',
+            message: `${assignerName} assigned you ${assignedResults.length} lead(s) for calling.`,
+            type: 'LEAD',
+            recipientUserIds: [targetUserId],
+          },
+          tx,
+        );
+      }
 
       return {
         message: `Successfully assigned ${assignedResults.length} lead(s)`,
@@ -1504,6 +1586,32 @@ export class LeadsService {
         throw new NotFoundException('Target LeadStatus not found or inactive');
       }
 
+      // Fetch user role info for forward-only check and approval exemptions
+      const userRecord = await tx.user.findUnique({
+        where: { id: user.sub },
+        include: { role: true },
+      });
+      const userRoleName = userRecord?.role?.name ? userRecord.role.name.toUpperCase() : '';
+      const isExemptRole = ['MANAGER', 'SUPER_ADMIN', 'SUPERADMIN', 'ADMIN', 'HR'].includes(userRoleName);
+      const isProgramAdvisor = userRoleName === 'PROGRAM_ADVISOR' || !isExemptRole;
+
+      const targetCollegeId = dto.collegeId || (lead.collegeApplications.length === 1 ? lead.collegeApplications[0].collegeId : null);
+      const existingLeadCollege = targetCollegeId
+        ? lead.collegeApplications.find((app) => app.collegeId === targetCollegeId) || null
+        : null;
+
+      if (existingLeadCollege) {
+        this.validatePitchApproval(existingLeadCollege);
+
+        if (isProgramAdvisor && existingLeadCollege.status) {
+          if (targetStatus.displayOrder < existingLeadCollege.status.displayOrder) {
+            throw new BadRequestException(
+              'Program Advisors cannot move pipeline status backwards.',
+            );
+          }
+        }
+      }
+
       const statusName = targetStatus.name.toUpperCase();
       let relevantLeadCollege: any = null;
       let activityDescription = `Lead status changed to ${targetStatus.name}`;
@@ -1529,10 +1637,18 @@ export class LeadsService {
             leadId,
             collegeId: dto.collegeId,
           },
+          include: { status: true },
         });
 
         if (existingApp) {
           this.validatePitchApproval(existingApp);
+          if (isProgramAdvisor && existingApp.status) {
+            if (targetStatus.displayOrder < existingApp.status.displayOrder) {
+              throw new BadRequestException(
+                'Program Advisors cannot move pipeline status backwards.',
+              );
+            }
+          }
           if (existingApp.applicationId) {
             throw new ConflictException(
               `An application for ${college.name} already exists for this lead`,
@@ -1551,6 +1667,51 @@ export class LeadsService {
               'This college is not currently available for pitching.',
             );
           }
+
+          const approvalStatus = isExemptRole
+            ? CollegeStatus.APPROVED
+            : college.requiresApproval
+              ? CollegeStatus.PENDING
+              : CollegeStatus.APPROVED;
+
+          if (approvalStatus === CollegeStatus.PENDING) {
+            await tx.leadCollege.create({
+              data: {
+                leadId,
+                collegeId: dto.collegeId,
+                applicationId: dto.applicationId,
+                statusId: lead.statusId,
+                pitchedById: user.sub,
+                approvalStatus: CollegeStatus.PENDING,
+              },
+            });
+
+            const managerId = await this.findResponsibleManagerId(tx, user.sub);
+            if (managerId) {
+              const paName = [userRecord?.firstName, userRecord?.lastName].filter(Boolean).join(' ') || 'Program Advisor';
+              const leadName = [lead.firstName, lead.lastName].filter(Boolean).join(' ');
+              const notification = await tx.notification.create({
+                data: {
+                  type: 'LEAD',
+                  title: 'New College Pitch Approval',
+                  message: `${paName} submitted ${leadName}'s pitch for ${college.name} for your approval.`,
+                },
+              });
+
+              await tx.notificationRecipient.create({
+                data: {
+                  notificationId: notification.id,
+                  userId: managerId,
+                  isRead: false,
+                },
+              });
+            }
+
+            throw new BadRequestException(
+              'College pipeline cannot be changed until Manager approval is completed.',
+            );
+          }
+
           relevantLeadCollege = await tx.leadCollege.create({
             data: {
               leadId,
@@ -1558,9 +1719,7 @@ export class LeadsService {
               applicationId: dto.applicationId,
               statusId: targetStatus.id,
               pitchedById: user.sub,
-              approvalStatus: college.requiresApproval
-                ? CollegeStatus.PENDING
-                : CollegeStatus.APPROVED,
+              approvalStatus: CollegeStatus.APPROVED,
             },
           });
         }
@@ -1602,7 +1761,6 @@ export class LeadsService {
         await tx.leadCollegeInterview.create({
           data: {
             leadCollegeId: relevantLeadCollege.id,
-            interviewerId: dto.interview.interviewerId || null,
             scheduledAt: new Date(dto.interview.scheduledAt),
             status: 'SCHEDULED',
             result: 'PENDING',
@@ -1876,5 +2034,1163 @@ export class LeadsService {
       });
     }, { timeout: 30000 });
   }
+
+  async getLead360Profile(leadId: string, userId: string) {
+    // 1. Authorization check: Must be SUPER_ADMIN, MANAGER, PROGRAM_ADVISOR, HR, or active team manager
+    const callingUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { role: true },
+    });
+
+    if (!callingUser || !callingUser.role) {
+      throw new UnauthorizedException('User profile not found');
+    }
+
+    const roleName = callingUser.role.name.toUpperCase();
+    const isAllowedRole =
+      roleName.includes('SUPER_ADMIN') ||
+      roleName.includes('MANAGER') ||
+      roleName.includes('PROGRAM_ADVISOR') ||
+      roleName.includes('ADVISOR') ||
+      roleName.includes('HR');
+
+    if (!isAllowedRole) {
+      const managedTeamsCount = await this.prisma.team.count({
+        where: { managerId: userId, isActive: true },
+      });
+      if (managedTeamsCount === 0) {
+        throw new ForbiddenException(
+          'Access denied: You do not have permission to view the Lead Profile.',
+        );
+      }
+    }
+
+    // 2. Fetch Lead with all nested relations
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            role: { select: { name: true } },
+          },
+        },
+        status: true,
+        finalCollege: true,
+        assignments: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                role: { select: { name: true } },
+              },
+            },
+          },
+          orderBy: { assignedAt: 'desc' },
+        },
+        tpcs: {
+          include: {
+            assignments: {
+              include: {
+                assignedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+                assignedTo: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+                completedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+              },
+              orderBy: { assignedAt: 'desc' },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+        interactions: {
+          include: {
+            createdBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+            attachments: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+        collegeApplications: {
+          include: {
+            college: true,
+            status: true,
+            pitchedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+            processedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+            interviews: {
+              orderBy: { scheduledAt: 'desc' },
+            },
+            selectionLetters: {
+              include: {
+                issuedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+              },
+              orderBy: { issuedAt: 'desc' },
+            },
+            payments: {
+              include: {
+                processedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+              },
+              orderBy: { paidAt: 'desc' },
+            },
+            history: {
+              include: {
+                fromStatus: true,
+                toStatus: true,
+                changedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+              },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+
+    if (!lead) {
+      throw new NotFoundException(`Lead with ID ${leadId} not found.`);
+    }
+
+    // 3. Fetch Data Origin (StudentData & DataUpload) by matching phone or email
+    let dataOrigin: any = null;
+    if (lead.phone || lead.email) {
+      const studentData = await this.prisma.studentData.findFirst({
+        where: {
+          OR: [
+            ...(lead.phone ? [{ phone: lead.phone }] : []),
+            ...(lead.email ? [{ email: lead.email }] : []),
+          ],
+        },
+        include: {
+          upload: {
+            include: {
+              uploadedBy: {
+                select: { id: true, firstName: true, lastName: true, email: true, role: { select: { name: true } } },
+              },
+            },
+          },
+          assignmentItems: {
+            include: {
+              assignment: {
+                include: {
+                  assignedBy: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+                  assignedTo: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+                },
+              },
+            },
+            orderBy: { assignment: { assignedAt: 'desc' } },
+          },
+        },
+      });
+
+      if (studentData) {
+        const latestAssignment = studentData.assignmentItems[0]?.assignment;
+        dataOrigin = {
+          studentDataId: studentData.id,
+          fileName: studentData.upload?.fileName || 'Bulk Data Upload',
+          fileUrl: studentData.upload?.fileUrl || null,
+          uploadedAt: studentData.upload?.uploadedAt || studentData.createdAt,
+          uploadedBy: studentData.upload?.uploadedBy
+            ? {
+              id: studentData.upload.uploadedBy.id,
+              name: `${studentData.upload.uploadedBy.firstName} ${studentData.upload.uploadedBy.lastName || ''}`.trim(),
+              role: studentData.upload.uploadedBy.role?.name || 'User',
+            }
+            : null,
+          assignedAt: latestAssignment?.assignedAt || null,
+          assignedBy: latestAssignment?.assignedBy
+            ? {
+              id: latestAssignment.assignedBy.id,
+              name: `${latestAssignment.assignedBy.firstName} ${latestAssignment.assignedBy.lastName || ''}`.trim(),
+              role: latestAssignment.assignedBy.role?.name || 'User',
+            }
+            : null,
+          assignedTo: latestAssignment?.assignedTo
+            ? {
+              id: latestAssignment.assignedTo.id,
+              name: `${latestAssignment.assignedTo.firstName} ${latestAssignment.assignedTo.lastName || ''}`.trim(),
+              role: latestAssignment.assignedTo.role?.name || 'User',
+            }
+            : null,
+        };
+      }
+    }
+
+    // 4. Fetch Activity Logs
+    const collegeAppIds = lead.collegeApplications.map((c) => c.id);
+    const tpcIds = lead.tpcs.map((t) => t.id);
+
+    const activityLogs = await this.prisma.activityLog.findMany({
+      where: {
+        OR: [
+          { entityType: 'LEAD', entityId: leadId },
+          { entityType: 'Lead', entityId: leadId },
+          ...(collegeAppIds.length > 0
+            ? [
+              { entityType: 'LEAD_COLLEGE', entityId: { in: collegeAppIds } },
+              { entityType: 'LeadCollege', entityId: { in: collegeAppIds } },
+            ]
+            : []),
+          ...(tpcIds.length > 0
+            ? [
+              { entityType: 'TPC', entityId: { in: tpcIds } },
+              { entityType: 'Tpc', entityId: { in: tpcIds } },
+            ]
+            : []),
+        ],
+      },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // 5. Fetch Status ordering configuration
+    const allStatuses = await this.prisma.leadStatus.findMany({
+      orderBy: { displayOrder: 'asc' },
+    });
+
+    const applicationStatus = allStatuses.find(
+      (s) =>
+        s.name.toUpperCase().includes('APPLICATION') ||
+        s.name.toUpperCase().includes('APPLIED'),
+    );
+    const applicationThresholdOrder = applicationStatus ? applicationStatus.displayOrder : 3;
+
+    // 6. Compute Lead Pipeline Status Stages
+    const currentLeadStatusOrder = lead.status?.displayOrder || 1;
+    const leadPipeline = allStatuses.map((st) => ({
+      id: st.id,
+      name: st.name,
+      description: st.description,
+      color: st.color,
+      displayOrder: st.displayOrder,
+      isCompleted: st.displayOrder < currentLeadStatusOrder,
+      isCurrent: st.displayOrder === currentLeadStatusOrder,
+      isUpcoming: st.displayOrder > currentLeadStatusOrder,
+    }));
+
+    // 7. Process College Journeys (Independent pipelines + Significance)
+    const colleges = lead.collegeApplications.map((app) => {
+      const isSignificant = app.status.displayOrder >= applicationThresholdOrder;
+      const appStatusOrder = app.status.displayOrder;
+
+      const pipeline = allStatuses.map((st) => ({
+        id: st.id,
+        name: st.name,
+        description: st.description,
+        color: st.color,
+        displayOrder: st.displayOrder,
+        isCompleted: st.displayOrder < appStatusOrder,
+        isCurrent: st.displayOrder === appStatusOrder,
+        isUpcoming: st.displayOrder > appStatusOrder,
+      }));
+
+      const pitchedByInfo = app.pitchedBy
+        ? {
+            id: app.pitchedBy.id,
+            name: `${app.pitchedBy.firstName} ${app.pitchedBy.lastName || ''}`.trim(),
+            role: app.pitchedBy.role?.name || 'User',
+          }
+        : null;
+
+      // Application info
+      const applicationDetails = {
+        applicationId: app.applicationId || null,
+        coursePitched: app.coursePitched || lead.courseInterested || 'N/A',
+        specializationPitched: app.specializationPitched || lead.specializationInterested || 'N/A',
+        feePitched: app.feePitched ? Number(app.feePitched) : null,
+        createdAt: app.createdAt,
+        pitchedBy: pitchedByInfo,
+        processedBy: app.processedBy
+          ? {
+              id: app.processedBy.id,
+              name: `${app.processedBy.firstName} ${app.processedBy.lastName || ''}`.trim(),
+              role: app.processedBy.role?.name || 'User',
+            }
+          : null,
+      };
+
+      // Interviews
+      const interviews = app.interviews.map((iv) => ({
+        id: iv.id,
+        scheduledAt: iv.scheduledAt,
+        conductedAt: iv.conductedAt,
+        status: iv.status,
+        result: iv.result,
+        feedback: iv.feedback,
+        meetingLink: iv.meetingLink,
+      }));
+
+      // Selection Letters
+      const selection = app.selectionLetters[0]
+        ? {
+            id: app.selectionLetters[0].id,
+            letterUrl: app.selectionLetters[0].letterUrl,
+            issuedAt: app.selectionLetters[0].issuedAt,
+            admissionLastDate: app.selectionLetters[0].admissionLastDate,
+            issuedBy: app.selectionLetters[0].issuedBy
+              ? {
+                  id: app.selectionLetters[0].issuedBy.id,
+                  name: `${app.selectionLetters[0].issuedBy.firstName} ${app.selectionLetters[0].issuedBy.lastName || ''}`.trim(),
+                  role: app.selectionLetters[0].issuedBy.role?.name || 'User',
+                }
+              : null,
+          }
+        : null;
+
+      // Payments
+      const payments = app.payments.map((p) => ({
+        id: p.id,
+        type: p.type,
+        amount: Number(p.amount),
+        transactionRef: p.transactionRef,
+        paymentMode: p.paymentMode,
+        paidAt: p.paidAt,
+        remarks: p.remarks,
+        refundStatus: p.refundStatus,
+        processedBy: p.processedBy
+          ? {
+              id: p.processedBy.id,
+              name: `${p.processedBy.firstName} ${p.processedBy.lastName || ''}`.trim(),
+              role: p.processedBy.role?.name || 'User',
+            }
+          : null,
+      }));
+
+      // College-specific timeline history
+      const collegeTimeline = app.history.map((h) => ({
+        id: h.id,
+        fromStatus: h.fromStatus?.name || 'NEW',
+        toStatus: h.toStatus.name,
+        remarks: h.remarks,
+        changedAt: h.createdAt,
+        changedBy: h.changedBy
+          ? {
+              id: h.changedBy.id,
+              name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
+              role: h.changedBy.role?.name || 'User',
+            }
+          : null,
+      }));
+
+      return {
+        id: app.id,
+        collegeId: app.college.id,
+        collegeName: app.college.name,
+        collegeCity: app.college.city,
+        collegeState: app.college.state,
+        currentStatus: {
+          id: app.status.id,
+          name: app.status.name,
+          color: app.status.color,
+          displayOrder: app.status.displayOrder,
+        },
+        approvalStatus: app.approvalStatus,
+        isSignificant,
+        pipeline,
+        pitchedBy: pitchedByInfo,
+        applicationDetails,
+        interviews,
+        selection,
+        payments,
+        history: collegeTimeline,
+        createdAt: app.createdAt,
+      };
+    });
+
+    // 8. TPC Journey processing
+    const tpcAssignments: any[] = [];
+    for (const tpc of lead.tpcs) {
+      for (const assign of tpc.assignments) {
+        tpcAssignments.push({
+          id: assign.id,
+          tpcId: tpc.id,
+          status: assign.status,
+          assignedAt: assign.assignedAt,
+          completedAt: assign.completedAt,
+          assignedBy: assign.assignedBy
+            ? {
+              id: assign.assignedBy.id,
+              name: `${assign.assignedBy.firstName} ${assign.assignedBy.lastName || ''}`.trim(),
+              role: assign.assignedBy.role?.name || 'User',
+            }
+            : null,
+          assignedTo: assign.assignedTo
+            ? {
+              id: assign.assignedTo.id,
+              name: `${assign.assignedTo.firstName} ${assign.assignedTo.lastName || ''}`.trim(),
+              role: assign.assignedTo.role?.name || 'User',
+            }
+            : null,
+          completedBy: assign.completedBy
+            ? {
+              id: assign.completedBy.id,
+              name: `${assign.completedBy.firstName} ${assign.completedBy.lastName || ''}`.trim(),
+              role: assign.completedBy.role?.name || 'User',
+            }
+            : null,
+        });
+      }
+    }
+
+    // 9. Collect People Involved (deduplicated)
+    const peopleMap = new Map<string, { id: string; name: string; email?: string; role: string; actions: Set<string> }>();
+
+    const addPersonAction = (usr: any, action: string) => {
+      if (!usr || !usr.id) return;
+      const name = `${usr.firstName || ''} ${usr.lastName || ''}`.trim() || 'Unknown User';
+      const role = usr.role?.name || 'User';
+      if (!peopleMap.has(usr.id)) {
+        peopleMap.set(usr.id, { id: usr.id, name, email: usr.email, role, actions: new Set([action]) });
+      } else {
+        peopleMap.get(usr.id)!.actions.add(action);
+      }
+    };
+
+    if (dataOrigin?.uploadedBy?.id) {
+      addPersonAction(dataOrigin.uploadedBy, 'Data Uploader');
+    }
+    if (dataOrigin?.assignedBy?.id) {
+      addPersonAction(dataOrigin.assignedBy, 'Data Assigner');
+    }
+    if (dataOrigin?.assignedTo?.id) {
+      addPersonAction(dataOrigin.assignedTo, 'Data Assignee');
+    }
+    if (lead.createdBy) {
+      addPersonAction(lead.createdBy, 'Lead Creator');
+    }
+
+    for (const a of lead.assignments) {
+      if (a.user) addPersonAction(a.user, 'Lead Assignee');
+    }
+
+    for (const ta of tpcAssignments) {
+      if (ta.assignedBy) addPersonAction(ta.assignedBy, 'TPC Assigner');
+      if (ta.assignedTo) addPersonAction(ta.assignedTo, 'TPC Counselor');
+      if (ta.completedBy) addPersonAction(ta.completedBy, 'TPC Completer');
+    }
+
+    for (const c of lead.collegeApplications) {
+      if (c.pitchedBy) addPersonAction(c.pitchedBy, `Pitched ${c.college.name}`);
+      if (c.processedBy) addPersonAction(c.processedBy, `Approved Pitch for ${c.college.name}`);
+      for (const sl of c.selectionLetters) {
+        if (sl.issuedBy) addPersonAction(sl.issuedBy, `Issued Selection Letter (${c.college.name})`);
+      }
+      for (const pm of c.payments) {
+        if (pm.processedBy) addPersonAction(pm.processedBy, `Processed Payment (${c.college.name})`);
+      }
+    }
+
+    for (const it of lead.interactions) {
+      if (it.createdBy) addPersonAction(it.createdBy, 'Interaction Creator');
+    }
+
+    const people = Array.from(peopleMap.values()).map((p) => ({
+      id: p.id,
+      name: p.name,
+      email: p.email,
+      role: p.role,
+      actions: Array.from(p.actions),
+    }));
+
+    // 10. Construct Normalized Master Chronological Timeline
+    const timelineEvents: any[] = [];
+
+    // Data Acquired Event
+    if (dataOrigin) {
+      timelineEvents.push({
+        id: `event-data-${dataOrigin.studentDataId}`,
+        type: 'DATA_ACQUIRED',
+        title: 'Data Acquired',
+        description: `Imported via file "${dataOrigin.fileName}"`,
+        timestamp: dataOrigin.uploadedAt,
+        actor: dataOrigin.uploadedBy,
+        metadata: { fileName: dataOrigin.fileName, fileUrl: dataOrigin.fileUrl },
+      });
+
+      if (dataOrigin.assignedAt) {
+        timelineEvents.push({
+          id: `event-data-assign-${dataOrigin.studentDataId}`,
+          type: 'DATA_CLAIMED',
+          title: 'Data Assigned / Claimed',
+          description: `Data assigned to ${dataOrigin.assignedTo?.name || 'Advisor'}`,
+          timestamp: dataOrigin.assignedAt,
+          actor: dataOrigin.assignedBy || dataOrigin.assignedTo,
+          metadata: { assignedTo: dataOrigin.assignedTo },
+        });
+      }
+    }
+
+    // Lead Created Event
+    timelineEvents.push({
+      id: `event-lead-created-${lead.id}`,
+      type: 'LEAD_CREATED',
+      title: 'Lead Created',
+      description: `Lead created in system with status "${lead.status.name}"`,
+      timestamp: lead.createdAt,
+      actor: lead.createdBy
+        ? {
+          id: lead.createdBy.id,
+          name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
+          role: lead.createdBy.role?.name || 'User',
+        }
+        : null,
+      metadata: { source: lead.source },
+    });
+
+    // Lead Assignments Events
+    for (const a of lead.assignments) {
+      timelineEvents.push({
+        id: `event-assignment-${a.id}`,
+        type: 'LEAD_ASSIGNMENT',
+        title: `Lead Assigned (${a.status})`,
+        description: `Assigned to ${a.user.firstName} ${a.user.lastName || ''}`,
+        timestamp: a.assignedAt,
+        actor: {
+          id: a.user.id,
+          name: `${a.user.firstName} ${a.user.lastName || ''}`.trim(),
+          role: a.user.role?.name || 'User',
+        },
+        metadata: { expiresAt: a.expiresAt, status: a.status },
+      });
+    }
+
+    // TPC Events
+    for (const ta of tpcAssignments) {
+      timelineEvents.push({
+        id: `event-tpc-assigned-${ta.id}`,
+        type: 'TPC_ASSIGNED',
+        title: 'TPC Assigned',
+        description: `TPC task assigned to ${ta.assignedTo?.name || 'Counselor'}`,
+        timestamp: ta.assignedAt,
+        actor: ta.assignedBy,
+        metadata: { assignedTo: ta.assignedTo, status: ta.status },
+      });
+
+      if (ta.completedAt) {
+        timelineEvents.push({
+          id: `event-tpc-completed-${ta.id}`,
+          type: 'TPC_COMPLETED',
+          title: 'TPC Completed',
+          description: `TPC task completed by ${ta.completedBy?.name || 'Counselor'}`,
+          timestamp: ta.completedAt,
+          actor: ta.completedBy || ta.assignedTo,
+          metadata: { status: ta.status },
+        });
+      }
+    }
+
+    // Interaction & Call Events
+    for (const it of lead.interactions) {
+      const isCall = it.title?.toLowerCase().includes('call') || it.description?.toLowerCase().includes('call');
+      timelineEvents.push({
+        id: `event-interaction-${it.id}`,
+        type: isCall ? 'CALL' : 'INTERACTION',
+        title: it.title || (isCall ? 'Phone Call' : 'Counselor Note'),
+        description: it.description,
+        timestamp: it.createdAt,
+        actor: it.createdBy
+          ? {
+            id: it.createdBy.id,
+            name: `${it.createdBy.firstName} ${it.createdBy.lastName || ''}`.trim(),
+            role: it.createdBy.role?.name || 'User',
+          }
+          : null,
+        metadata: { attachmentsCount: it.attachments.length },
+      });
+    }
+
+    // College Journey Events
+    for (const colApp of lead.collegeApplications) {
+      const collegeName = colApp.college.name;
+
+      timelineEvents.push({
+        id: `event-college-pitch-${colApp.id}`,
+        type: 'COLLEGE_PITCHED',
+        title: `${collegeName} - Pitched`,
+        description: `Pitched ${colApp.coursePitched || lead.courseInterested || 'Course'} to student`,
+        timestamp: colApp.createdAt,
+        actor: colApp.pitchedBy
+          ? {
+            id: colApp.pitchedBy.id,
+            name: `${colApp.pitchedBy.firstName} ${colApp.pitchedBy.lastName || ''}`.trim(),
+            role: colApp.pitchedBy.role?.name || 'User',
+          }
+          : null,
+        metadata: { collegeId: colApp.collegeId, collegeName, coursePitched: colApp.coursePitched },
+      });
+
+      for (const h of colApp.history) {
+        timelineEvents.push({
+          id: `event-college-hist-${h.id}`,
+          type: 'COLLEGE_STATUS_CHANGE',
+          title: `${collegeName} - Status Changed to ${h.toStatus.name}`,
+          description: h.remarks || `Status changed from ${h.fromStatus?.name || 'NEW'} to ${h.toStatus.name}`,
+          timestamp: h.createdAt,
+          actor: h.changedBy
+            ? {
+              id: h.changedBy.id,
+              name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
+              role: h.changedBy.role?.name || 'User',
+            }
+            : null,
+          metadata: { collegeId: colApp.collegeId, collegeName, fromStatus: h.fromStatus?.name, toStatus: h.toStatus.name },
+        });
+      }
+
+      for (const iv of colApp.interviews) {
+        timelineEvents.push({
+          id: `event-interview-${iv.id}`,
+          type: iv.conductedAt ? 'INTERVIEW_CONDUCTED' : 'INTERVIEW_SCHEDULED',
+          title: `${collegeName} - Interview ${iv.conductedAt ? 'Conducted' : 'Scheduled'}`,
+          description: `Status: ${iv.status}, Result: ${iv.result}${iv.feedback ? ` | Feedback: ${iv.feedback}` : ''}`,
+          timestamp: iv.conductedAt || iv.scheduledAt,
+          actor: null,
+          metadata: { collegeId: colApp.collegeId, collegeName, result: iv.result, meetingLink: iv.meetingLink },
+        });
+      }
+
+      for (const sl of colApp.selectionLetters) {
+        timelineEvents.push({
+          id: `event-selection-${sl.id}`,
+          type: 'SELECTION_LETTER_ISSUED',
+          title: `${collegeName} - Selection Letter Issued`,
+          description: `Admission deadline: ${new Date(sl.admissionLastDate).toLocaleDateString()}`,
+          timestamp: sl.issuedAt,
+          actor: sl.issuedBy
+            ? {
+              id: sl.issuedBy.id,
+              name: `${sl.issuedBy.firstName} ${sl.issuedBy.lastName || ''}`.trim(),
+              role: sl.issuedBy.role?.name || 'User',
+            }
+            : null,
+          metadata: { collegeId: colApp.collegeId, collegeName, letterUrl: sl.letterUrl },
+        });
+      }
+
+      for (const pm of colApp.payments) {
+        timelineEvents.push({
+          id: `event-payment-${pm.id}`,
+          type: 'PAYMENT_RECEIVED',
+          title: `${collegeName} - Payment Received (${pm.type})`,
+          description: `Amount: ₹${Number(pm.amount).toLocaleString('en-IN')}${pm.paymentMode ? ` via ${pm.paymentMode}` : ''}${pm.transactionRef ? ` (Ref: ${pm.transactionRef})` : ''}`,
+          timestamp: pm.paidAt,
+          actor: pm.processedBy
+            ? {
+              id: pm.processedBy.id,
+              name: `${pm.processedBy.firstName} ${pm.processedBy.lastName || ''}`.trim(),
+              role: pm.processedBy.role?.name || 'User',
+            }
+            : null,
+          metadata: { collegeId: colApp.collegeId, collegeName, amount: Number(pm.amount), type: pm.type },
+        });
+      }
+    }
+
+    // Activity Log Events
+    for (const al of activityLogs) {
+      timelineEvents.push({
+        id: `event-activity-${al.id}`,
+        type: 'SYSTEM_ACTIVITY',
+        title: `Activity: ${al.activity}`,
+        description: al.description || `Action on ${al.entityType}`,
+        timestamp: al.createdAt,
+        actor: al.user
+          ? {
+            id: al.user.id,
+            name: `${al.user.firstName} ${al.user.lastName || ''}`.trim(),
+            role: al.user.role?.name || 'User',
+          }
+          : null,
+        metadata: { activity: al.activity, entityType: al.entityType, entityId: al.entityId },
+      });
+    }
+
+    // Sort Master Timeline descending by timestamp
+    const masterTimeline = timelineEvents.sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
+
+    // 11. Summary Metrics
+    const activeAssignee = lead.assignments.find((a) => a.status === 'ACTIVE')?.user;
+    const currentOwnerName = activeAssignee
+      ? `${activeAssignee.firstName} ${activeAssignee.lastName || ''}`.trim()
+      : lead.createdBy
+        ? `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim()
+        : 'Unassigned';
+
+    const latestTpc = tpcAssignments[0];
+    const totalPaidAmount = colleges.reduce((sum, c) => {
+      return sum + c.payments.reduce((pSum, p) => pSum + p.amount, 0);
+    }, 0);
+
+    const summary = {
+      acquiredAt: dataOrigin?.uploadedAt || lead.createdAt,
+      currentOwner: currentOwnerName,
+      tpcStatus: latestTpc ? latestTpc.status : 'NO_TPC',
+      tpcAttemptsCount: tpcAssignments.length,
+      callsInteractionsCount: lead.interactions.length,
+      collegesCount: colleges.length,
+      applicationsCount: colleges.filter((c) => c.isSignificant).length,
+      interviewsCount: colleges.reduce((sum, c) => sum + c.interviews.length, 0),
+      selectionsCount: colleges.reduce((sum, c) => sum + (c.selection ? 1 : 0), 0),
+      paymentsCount: colleges.reduce((sum, c) => sum + c.payments.length, 0),
+      totalPaidAmount,
+      leadStatus: lead.status.name,
+      leadStatusColor: lead.status.color,
+    };
+
+    return {
+      lead: {
+        id: lead.id,
+        shortId: `LD-${lead.id.slice(0, 4).toUpperCase()}`,
+        firstName: lead.firstName,
+        lastName: lead.lastName,
+        fullName: `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        phone: lead.phone,
+        alternatePhone: lead.alternatePhone,
+        email: lead.email,
+        gender: lead.gender,
+        dateOfBirth: lead.dateOfBirth,
+        city: lead.city,
+        state: lead.state,
+        tenthPercentage: lead.tenthPercentage,
+        twelfthPercentage: lead.twelfthPercentage,
+        graduationPercentage: lead.graduationPercentage,
+        graduationCourse: lead.graduationCourse,
+        graduationSpecialization: lead.graduationSpecialization,
+        courseInterested: lead.courseInterested,
+        specializationInterested: lead.specializationInterested,
+        passingYear: lead.passingYear,
+        source: lead.source,
+        createdAt: lead.createdAt,
+        updatedAt: lead.updatedAt,
+        status: {
+          id: lead.status.id,
+          name: lead.status.name,
+          description: lead.status.description,
+          color: lead.status.color,
+          displayOrder: lead.status.displayOrder,
+        },
+        finalCollege: lead.finalCollege
+          ? {
+            id: lead.finalCollege.id,
+            name: lead.finalCollege.name,
+          }
+          : null,
+        createdBy: lead.createdBy
+          ? {
+            id: lead.createdBy.id,
+            name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
+            email: lead.createdBy.email,
+            role: lead.createdBy.role?.name || 'User',
+          }
+          : null,
+      },
+      summary,
+      dataOrigin,
+      leadPipeline,
+      tpcJourney: {
+        totalAssignments: tpcAssignments.length,
+        latestStatus: latestTpc?.status || 'NONE',
+        assignments: tpcAssignments,
+      },
+      colleges,
+      people,
+      masterTimeline,
+    };
+  }
+
+  async createClaimRequest(leadId: string, userId: string) {
+    const now = new Date();
+
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        status: true,
+        assignments: {
+          orderBy: { assignedAt: 'desc' },
+        },
+      },
+    });
+
+    if (!lead) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    const existingPending = await this.prisma.leadClaimRequest.findFirst({
+      where: {
+        leadId,
+        status: 'PENDING',
+      },
+    });
+
+    if (existingPending) {
+      throw new ConflictException(
+        'A pending claim request already exists for this lead.',
+      );
+    }
+
+    const eligibility = this.evaluateLeadEligibility(lead, now);
+
+    if (!eligibility.isEligible) {
+      if (eligibility.errorCode === 'PERMANENT') {
+        throw new ForbiddenException(
+          'Leads with completed admission cannot be assigned or reassigned.',
+        );
+      } else if (eligibility.errorCode === 'ACTIVE_WINDOW') {
+        throw new ConflictException(
+          'This lead is currently inside an active 4-day assignment window and cannot be reassigned.',
+        );
+      } else if (eligibility.errorCode === 'PROTECTED') {
+        throw new ConflictException(
+          'This lead has progressed in the pipeline and cannot be reassigned.',
+        );
+      } else {
+        throw new ConflictException(
+          eligibility.reason || 'This lead is not eligible for claim request.',
+        );
+      }
+    }
+
+    const claimRequest = await this.prisma.leadClaimRequest.create({
+      data: {
+        leadId,
+        requestedById: userId,
+        status: 'PENDING',
+        requestedAt: now,
+      },
+    });
+
+    await this.prisma.activityLog.create({
+      data: {
+        userId,
+        activity: 'LEAD',
+        entityType: 'LEAD_CLAIM_REQUEST',
+        entityId: claimRequest.id,
+        description: `CLAIM_REQUESTED: Lead claim requested for lead ${leadId}`,
+      },
+    });
+
+    return claimRequest;
+  }
+
+  async getClaimRequests(userId: string, query?: QueryClaimRequestDto) {
+    const callingUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { role: true },
+    });
+
+    if (
+      !callingUser ||
+      (!callingUser.role?.name?.toUpperCase().includes('SUPER_ADMIN') &&
+        callingUser.roleId !== 1)
+    ) {
+      throw new ForbiddenException(
+        'Access denied: Only SUPER_ADMIN can view claim requests.',
+      );
+    }
+
+    const where: any = {};
+    if (query?.status) {
+      where.status = query.status;
+    }
+
+    const requests = await this.prisma.leadClaimRequest.findMany({
+      where,
+      orderBy: { requestedAt: 'desc' },
+      include: {
+        lead: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true,
+            createdById: true,
+            createdBy: {
+              select: { id: true, firstName: true, lastName: true, email: true },
+            },
+            assignments: {
+              orderBy: { assignedAt: 'desc' },
+              take: 1,
+              include: {
+                user: {
+                  select: { id: true, firstName: true, lastName: true, email: true },
+                },
+              },
+            },
+          },
+        },
+        requestedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        processedBy: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+      },
+    });
+
+    return requests.map((req) => {
+      const leadName = [req.lead.firstName, req.lead.lastName]
+        .filter(Boolean)
+        .join(' ');
+      const currentOwnerUser =
+        req.lead.assignments[0]?.user || req.lead.createdBy;
+      const currentOwnerName = [
+        currentOwnerUser?.firstName,
+        currentOwnerUser?.lastName,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const requesterName = [
+        req.requestedBy.firstName,
+        req.requestedBy.lastName,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const processedByName = req.processedBy
+        ? [req.processedBy.firstName, req.processedBy.lastName]
+            .filter(Boolean)
+            .join(' ')
+        : null;
+
+      return {
+        requestId: req.id,
+        leadId: req.leadId,
+        leadName,
+        phone: req.lead.phone,
+        email: req.lead.email,
+        currentOwner: {
+          id: currentOwnerUser?.id,
+          name: currentOwnerName,
+          email: currentOwnerUser?.email,
+        },
+        requester: {
+          id: req.requestedBy.id,
+          name: requesterName,
+          email: req.requestedBy.email,
+        },
+        status: req.status,
+        requestedAt: req.requestedAt,
+        processedBy: req.processedBy
+          ? {
+              id: req.processedBy.id,
+              name: processedByName,
+              email: req.processedBy.email,
+            }
+          : null,
+        processedAt: req.processedAt,
+        remarks: req.remarks,
+      };
+    });
+  }
+
+  async processClaimRequest(
+    requestId: string,
+    superAdminId: string,
+    dto: ProcessClaimRequestDto,
+  ) {
+    const callingUser = await this.prisma.user.findUnique({
+      where: { id: superAdminId },
+      include: { role: true },
+    });
+
+    if (
+      !callingUser ||
+      (!callingUser.role?.name?.toUpperCase().includes('SUPER_ADMIN') &&
+        callingUser.roleId !== 1)
+    ) {
+      throw new ForbiddenException(
+        'Access denied: Only SUPER_ADMIN can process claim requests.',
+      );
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const lockedRequestRaw = await tx.$queryRaw<any[]>`
+          SELECT id, status, "leadId", "requestedById" FROM "LeadClaimRequest" WHERE id = ${requestId}::uuid FOR UPDATE
+        `;
+
+        if (!lockedRequestRaw || lockedRequestRaw.length === 0) {
+          throw new NotFoundException('Claim request not found');
+        }
+        const lockedRequest = lockedRequestRaw[0];
+
+        if (lockedRequest.status !== 'PENDING') {
+          throw new ConflictException(
+            'Claim request is no longer pending and has already been processed.',
+          );
+        }
+
+        const leadId = lockedRequest.leadId;
+        await tx.$queryRaw`SELECT id FROM "Lead" WHERE id = ${leadId}::uuid FOR UPDATE`;
+
+        const lead = await tx.lead.findUnique({
+          where: { id: leadId },
+          include: {
+            status: true,
+            assignments: { orderBy: { assignedAt: 'desc' } },
+          },
+        });
+
+        if (!lead) {
+          throw new NotFoundException('Lead not found');
+        }
+
+        const now = new Date();
+
+        if (dto.status === 'REJECTED') {
+          const updatedRequest = await tx.leadClaimRequest.update({
+            where: { id: requestId },
+            data: {
+              status: 'REJECTED',
+              processedById: superAdminId,
+              processedAt: now,
+              remarks: dto.remarks || null,
+            },
+          });
+
+          await tx.activityLog.create({
+            data: {
+              userId: superAdminId,
+              activity: 'LEAD',
+              entityType: 'LEAD_CLAIM_REQUEST',
+              entityId: requestId,
+              description: `CLAIM_REJECTED: Claim request rejected by Super Admin. Requester: ${lockedRequest.requestedById}. Remarks: ${dto.remarks || 'None'}`,
+            },
+          });
+
+          const leadName = [lead.firstName, lead.lastName]
+            .filter(Boolean)
+            .join(' ');
+          await this.notificationsService.createNotification(
+            {
+              title: 'Lead Claim Rejected',
+              message: `Your request to claim lead ${leadName} has been rejected.`,
+              type: 'LEAD',
+              recipientUserIds: [lockedRequest.requestedById],
+            },
+            tx,
+          );
+
+          return {
+            message: 'Claim request rejected successfully',
+            claimRequest: updatedRequest,
+          };
+        }
+
+        // IF APPROVED:
+        const eligibility = this.evaluateLeadEligibility(lead, now);
+
+        if (!eligibility.isEligible) {
+          if (eligibility.errorCode === 'PERMANENT') {
+            throw new ForbiddenException(
+              'Leads with completed admission cannot be assigned or reassigned.',
+            );
+          } else if (eligibility.errorCode === 'ACTIVE_WINDOW') {
+            throw new ConflictException(
+              'This lead is currently inside an active 4-day assignment window and cannot be reassigned.',
+            );
+          } else if (eligibility.errorCode === 'PROTECTED') {
+            throw new ConflictException(
+              'This lead has progressed in the pipeline and cannot be reassigned.',
+            );
+          } else {
+            throw new ConflictException(
+              eligibility.reason || 'This lead is not eligible for assignment.',
+            );
+          }
+        }
+
+        const requester = await tx.user.findUnique({
+          where: { id: lockedRequest.requestedById },
+          select: { id: true, status: true },
+        });
+
+        if (!requester || requester.status !== 'ACTIVE') {
+          throw new NotFoundException('Requester user not found or is inactive.');
+        }
+
+        const previousOwnerId = lead.assignments[0]?.userId || lead.createdById;
+
+        await tx.leadAssignment.updateMany({
+          where: {
+            leadId,
+            status: 'ACTIVE',
+          },
+          data: { status: 'EXPIRED' },
+        });
+
+        const expiresAt = new Date(now.getTime() + 4 * 24 * 60 * 60 * 1000);
+
+        const newAssignment = await tx.leadAssignment.create({
+          data: {
+            leadId,
+            userId: lockedRequest.requestedById,
+            assignedAt: now,
+            expiresAt,
+            status: 'ACTIVE',
+          },
+        });
+
+        const ownershipHistory = await tx.leadOwnershipHistory.create({
+          data: {
+            leadId,
+            previousOwnerId: previousOwnerId || null,
+            newOwnerId: lockedRequest.requestedById,
+            changedById: superAdminId,
+            reason: 'CLAIM_APPROVED',
+          },
+        });
+
+        const updatedRequest = await tx.leadClaimRequest.update({
+          where: { id: requestId },
+          data: {
+            status: 'APPROVED',
+            processedById: superAdminId,
+            processedAt: now,
+            remarks: dto.remarks || null,
+          },
+        });
+
+        const leadName = [lead.firstName, lead.lastName]
+          .filter(Boolean)
+          .join(' ');
+        await this.notificationsService.createNotification(
+          {
+            title: 'Lead Claim Approved',
+            message: `Your request to claim lead ${leadName} has been approved.`,
+            type: 'LEAD',
+            recipientUserIds: [lockedRequest.requestedById],
+          },
+          tx,
+        );
+
+        await tx.activityLog.create({
+          data: {
+            userId: superAdminId,
+            activity: 'LEAD',
+            entityType: 'LEAD_CLAIM_REQUEST',
+            entityId: requestId,
+            description: `CLAIM_APPROVED: Lead ${leadId} ownership transferred from ${previousOwnerId} to ${lockedRequest.requestedById} by Super Admin ${superAdminId}`,
+          },
+        });
+
+        return {
+          message: 'Claim request approved successfully',
+          claimRequest: updatedRequest,
+          assignment: newAssignment,
+          ownershipHistory,
+        };
+      },
+      { timeout: 30000 },
+    );
+  }
 }
+
 
