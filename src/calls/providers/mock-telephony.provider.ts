@@ -1,5 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { CallSession, TelephonyProvider } from '../interfaces/telephony-provider.interface';
+import {
+  CallSession,
+  TelephonyProvider,
+} from '../interfaces/telephony-provider.interface';
 
 @Injectable()
 export class MockTelephonyProvider implements TelephonyProvider {
@@ -8,7 +11,6 @@ export class MockTelephonyProvider implements TelephonyProvider {
   async initiateCall(phoneNumber: string): Promise<CallSession> {
     const callId = `mock-call-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
     const now = new Date();
-
 
     const session: CallSession = {
       callId,
@@ -31,7 +33,10 @@ export class MockTelephonyProvider implements TelephonyProvider {
     if (session.status === 'CALLING' || session.status === 'CONNECTED') {
       const now = new Date();
       const startTime = session.connectedAt || session.startedAt || now;
-      session.durationSeconds = Math.max(0, Math.floor((now.getTime() - startTime.getTime()) / 1000));
+      session.durationSeconds = Math.max(
+        0,
+        Math.floor((now.getTime() - startTime.getTime()) / 1000),
+      );
       session.status = 'CONNECTED';
     }
 
@@ -53,7 +58,10 @@ export class MockTelephonyProvider implements TelephonyProvider {
 
     const now = new Date();
     const startTime = session.connectedAt || session.startedAt || now;
-    const durationSeconds = Math.max(0, Math.floor((now.getTime() - startTime.getTime()) / 1000));
+    const durationSeconds = Math.max(
+      0,
+      Math.floor((now.getTime() - startTime.getTime()) / 1000),
+    );
 
     session.status = 'ENDED';
     session.endedAt = now;

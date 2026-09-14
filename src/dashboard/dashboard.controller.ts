@@ -6,7 +6,7 @@ import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-req
 @Controller('dashboard')
 @UseGuards(JwtAuthGuard)
 export class DashboardController {
-  constructor(private readonly dashboardService: DashboardService) { }
+  constructor(private readonly dashboardService: DashboardService) {}
 
   @Get('hr')
   getHRDashboardStats(@Req() req: AuthenticatedRequest) {

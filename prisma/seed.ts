@@ -39,6 +39,9 @@ async function main() {
     { name: 'COLLEGE_MANAGE', description: 'Manage college records and status' },
     { name: 'REPORT_HR_VIEW', description: 'View HR workforce reports' },
     { name: 'TEAM_MANAGE', description: 'Manage teams and team managers' },
+    { name: 'BYPASS_OFFICE_VALIDATION', description: 'Bypass physical office location validation on login' },
+    { name: 'MANAGE_ATTENDANCE_POLICY', description: 'Manage attendance policy rules' },
+    { name: 'MANAGE_HOLIDAYS', description: 'Manage HR holidays' },
   ];
 
   const permissionsMap = new Map<string, number>();
@@ -80,6 +83,8 @@ async function main() {
     { roleName: 'HR', permName: 'COLLEGE_MANAGE', scope: PermissionScope.ALL },
     { roleName: 'HR', permName: 'REPORT_HR_VIEW', scope: PermissionScope.ALL },
     { roleName: 'HR', permName: 'TEAM_MANAGE', scope: PermissionScope.ALL },
+    { roleName: 'HR', permName: 'MANAGE_ATTENDANCE_POLICY', scope: PermissionScope.ALL },
+    { roleName: 'HR', permName: 'MANAGE_HOLIDAYS', scope: PermissionScope.ALL },
 
     // Super Admin gets ALL permissions with ALL scope
     ...permissionsData.map((p) => ({
@@ -135,6 +140,24 @@ async function main() {
     });
   }
   console.log('Lead statuses seeded successfully');
+
+  // 6. Default Attendance Policies for Existing Offices
+  const offices = await prisma.office.findMany();
+  for (const office of offices) {
+    await prisma.attendancePolicy.upsert({
+      where: { officeId: office.id },
+      update: {},
+      create: {
+        officeId: office.id,
+        officeStartTime: '10:00',
+        casualLeaveCutoff: '10:30',
+        halfDayCutoff: '14:00',
+        officeEndTime: '19:00',
+        isActive: true,
+      },
+    });
+  }
+  console.log('AttendancePolicies seeded for existing offices successfully');
 }
 
 main()

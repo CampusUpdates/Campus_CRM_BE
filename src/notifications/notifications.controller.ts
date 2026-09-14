@@ -8,7 +8,10 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { NotificationsService, GetNotificationsQueryDto } from './notifications.service';
+import {
+  NotificationsService,
+  GetNotificationsQueryDto,
+} from './notifications.service';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
 
@@ -47,10 +50,7 @@ export class NotificationsController {
   }
 
   @Patch(':id/read')
-  markAsRead(
-    @Param('id') id: string,
-    @Req() req: AuthenticatedRequest,
-  ) {
+  markAsRead(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     return this.notificationsService.markAsRead(req.user.sub, id);
   }
 

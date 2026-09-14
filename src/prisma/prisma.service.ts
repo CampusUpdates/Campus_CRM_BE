@@ -32,11 +32,11 @@ const WRITE_OPERATIONS = new Set([
 @Injectable()
 export class PrismaService
   extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy {
+  implements OnModuleInit, OnModuleDestroy
+{
   private fallbackUserId: string | null = null;
 
   constructor(private readonly userContextService: UserContextService) {
-
     super({
       datasources: {
         db: {
@@ -82,20 +82,20 @@ export class PrismaService
                     `[PrismaService] Transient DB connection pool glitch (${errCode || 'pool'}, attempt ${attempts}/${maxAttempts}). Retrying in backoff...`,
                   );
                   const jitter = Math.floor(Math.random() * 150);
-                  await new Promise((res) => setTimeout(res, 400 * attempts + jitter));
+                  await new Promise((res) =>
+                    setTimeout(res, 400 * attempts + jitter),
+                  );
                 } else {
                   throw err;
                 }
               }
             }
 
-
             if (
               model &&
               model !== 'ActivityLog' &&
               WRITE_OPERATIONS.has(operation)
             ) {
-
               try {
                 let userId = self.userContextService?.getUserId?.();
 
@@ -122,7 +122,7 @@ export class PrismaService
                       ? 'Updated'
                       : 'Deleted';
 
-                  const res = result as any;
+                  const res = result;
                   let entityId = 'N/A';
                   if (res && typeof res === 'object' && res.id) {
                     entityId = String(res.id);
@@ -174,7 +174,7 @@ export class PrismaService
   }
 
   async onModuleInit() {
-    let retries = 10;
+    let retries = 3;
     while (retries > 0) {
       try {
         await this.$connect();
@@ -186,8 +186,13 @@ export class PrismaService
           `[PrismaService] DB connection attempt failed (${retries} retries left):`,
           (error as Error)?.message || error,
         );
-        if (retries === 0) throw error;
-        await new Promise((res) => setTimeout(res, 3000));
+        if (retries === 0) {
+          console.error(
+            '[PrismaService] Could not reach database server on startup. NestJS server will start up in degraded mode; database connections will be retried upon incoming requests.',
+          );
+        } else {
+          await new Promise((res) => setTimeout(res, 1000));
+        }
       }
     }
   }

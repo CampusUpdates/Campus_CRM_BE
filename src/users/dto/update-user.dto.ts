@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsString,
   Length,
+  ValidateIf,
 } from 'class-validator';
 
 export class UpdateUserDto {
@@ -39,8 +40,9 @@ export class UpdateUserDto {
   roleId?: number;
 
   @IsOptional()
+  @ValidateIf((_, val) => val !== null)
   @IsInt()
-  teamId?: number;
+  teamId?: number | null;
 
   @IsOptional()
   @IsString()

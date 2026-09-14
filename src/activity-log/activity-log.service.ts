@@ -7,7 +7,10 @@ import { ActivityType } from '@prisma/client';
 export class ActivityLogService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async buildActivityVisibilityFilter(userId: string, roleId: number): Promise<any> {
+  private async buildActivityVisibilityFilter(
+    userId: string,
+    roleId: number,
+  ): Promise<any> {
     let isSuperAdmin = roleId === 1;
     let isManager = roleId === 3;
     let roleName = '';
@@ -43,10 +46,7 @@ export class ActivityLogService {
       }
 
       return {
-        OR: [
-          { userId },
-          { user: { teamId: { in: managedTeamIds } } },
-        ],
+        OR: [{ userId }, { user: { teamId: { in: managedTeamIds } } }],
       };
     }
 
@@ -71,15 +71,24 @@ export class ActivityLogService {
       return { userId };
     }
 
-    throw new ForbiddenException('Access denied: Unauthorized to view Activity Logs.');
+    throw new ForbiddenException(
+      'Access denied: Unauthorized to view Activity Logs.',
+    );
   }
 
-  async findAll(query: QueryActivityLogDto, currentUserId: string, currentUserRoleId: number) {
+  async findAll(
+    query: QueryActivityLogDto,
+    currentUserId: string,
+    currentUserRoleId: number,
+  ) {
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
     const skip = (page - 1) * limit;
 
-    const visibilityWhere = await this.buildActivityVisibilityFilter(currentUserId, currentUserRoleId);
+    const visibilityWhere = await this.buildActivityVisibilityFilter(
+      currentUserId,
+      currentUserRoleId,
+    );
 
     const andConditions: any[] = [visibilityWhere];
 
@@ -157,4 +166,3 @@ export class ActivityLogService {
     });
   }
 }
-

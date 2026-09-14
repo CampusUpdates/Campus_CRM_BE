@@ -28,7 +28,7 @@ import { CollegeStatus } from '@prisma/client';
 
 @Controller('leads')
 export class LeadsController {
-  constructor(private readonly leadsService: LeadsService) { }
+  constructor(private readonly leadsService: LeadsService) {}
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('LEAD_CREATE')
@@ -43,9 +43,23 @@ export class LeadsController {
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('LEAD_VIEW')
   @Get()
-  findAll(@Req() req: AuthenticatedRequest) {
+  findAll(
+    @Req() req: AuthenticatedRequest,
+    @Query('status') status?: string,
+    @Query('statusGroup') statusGroup?: string,
+    @Query('search') search?: string,
+    @Query('time') time?: string,
+    @Query('fromDate') fromDate?: string,
+    @Query('toDate') toDate?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
     const scope = req.userPermissions?.['LEAD_VIEW'] || 'OWN';
-    return this.leadsService.findAll(req.user, scope);
+    return this.leadsService.findAll(
+      req.user,
+      { status, statusGroup, search, time, fromDate, toDate, page, limit },
+      scope,
+    );
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -121,10 +135,7 @@ export class LeadsController {
 
   @UseGuards(JwtAuthGuard)
   @Get(':id/profile')
-  getLead360Profile(
-    @Param('id') id: string,
-    @Req() req: AuthenticatedRequest,
-  ) {
+  getLead360Profile(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     return this.leadsService.getLead360Profile(id, req.user.sub);
   }
 

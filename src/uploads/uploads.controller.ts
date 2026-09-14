@@ -86,7 +86,10 @@ export class UploadsController {
   @Get('eligible-assignees')
   async getEligibleAssignees(@Req() req: AuthenticatedRequest) {
     await this.assertAdminOrManager(req.user.sub, req.user.roleId);
-    return this.uploadsService.findEligibleAssignees(req.user.sub, req.user.roleId);
+    return this.uploadsService.findEligibleAssignees(
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Get('unassigned-students')
@@ -116,7 +119,11 @@ export class UploadsController {
     @Req() req: AuthenticatedRequest,
   ) {
     await this.assertAdminOrManager(req.user.sub, req.user.roleId);
-    return this.uploadsService.assignData(assignDto, req.user.sub, req.user.roleId);
+    return this.uploadsService.assignData(
+      assignDto,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Post('reclaim-advisor-data/:advisorId')
@@ -125,13 +132,20 @@ export class UploadsController {
     @Req() req: AuthenticatedRequest,
   ) {
     await this.assertAdminOrManager(req.user.sub, req.user.roleId);
-    return this.uploadsService.reclaimAdvisorData(advisorId, req.user.sub, req.user.roleId);
+    return this.uploadsService.reclaimAdvisorData(
+      advisorId,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Post('reclaim-all-advisor-data')
   async reclaimAllAdvisorData(@Req() req: AuthenticatedRequest) {
     await this.assertAdminOrManager(req.user.sub, req.user.roleId);
-    return this.uploadsService.reclaimAllAdvisorData(req.user.sub, req.user.roleId);
+    return this.uploadsService.reclaimAllAdvisorData(
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Get(':id')
@@ -140,5 +154,3 @@ export class UploadsController {
     return this.uploadsService.findUploadOne(id);
   }
 }
-
-

@@ -5,7 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import type { TelephonyProvider, CallSession } from './interfaces/telephony-provider.interface';
+import type {
+  TelephonyProvider,
+  CallSession,
+} from './interfaces/telephony-provider.interface';
 import { DataAssignmentStatus } from '@prisma/client';
 
 @Injectable()
@@ -15,7 +18,6 @@ export class CallsService {
     @Inject('TelephonyProvider')
     private readonly telephonyProvider: any,
   ) {}
-
 
   async getCallQueue(advisorUserId: string) {
     const activeAssignments = await this.prisma.dataAssignment.findMany({
@@ -80,7 +82,10 @@ export class CallsService {
     };
   }
 
-  async getAssignedStudentDataOne(studentDataId: string, advisorUserId: string) {
+  async getAssignedStudentDataOne(
+    studentDataId: string,
+    advisorUserId: string,
+  ) {
     const studentData = await this.prisma.studentData.findUnique({
       where: { id: studentDataId },
       include: {
@@ -116,7 +121,10 @@ export class CallsService {
       throw new NotFoundException('Student data record not found.');
     }
 
-    if (!studentData.assignmentItems || studentData.assignmentItems.length === 0) {
+    if (
+      !studentData.assignmentItems ||
+      studentData.assignmentItems.length === 0
+    ) {
       throw new ForbiddenException(
         'Access denied: Student data record is not currently assigned to you.',
       );
@@ -129,7 +137,10 @@ export class CallsService {
   }
 
   async initiateMockCall(studentDataId: string, advisorUserId: string) {
-    const student = await this.getAssignedStudentDataOne(studentDataId, advisorUserId);
+    const student = await this.getAssignedStudentDataOne(
+      studentDataId,
+      advisorUserId,
+    );
     const session = await this.telephonyProvider.initiateCall(student.phone);
 
     await this.prisma.activityLog
@@ -139,7 +150,8 @@ export class CallsService {
           activity: 'SYSTEM',
           entityType: 'StudentData',
           entityId: studentDataId,
-          description: `Initiated mock call to ${student.firstName} ${student.lastName || ''}`.trim(),
+          description:
+            `Initiated mock call to ${student.firstName} ${student.lastName || ''}`.trim(),
         },
       })
       .catch(() => {});

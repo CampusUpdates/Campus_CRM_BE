@@ -27,4 +27,3 @@ export class QueryActivityLogDto {
   @IsString()
   search?: string;
 }
-

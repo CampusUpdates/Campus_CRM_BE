@@ -21,7 +21,7 @@ export interface AdmissionsDashboardFilters {
 
 @Injectable()
 export class DashboardService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
   private metadataCache: {
     timestamp: number;
@@ -37,43 +37,47 @@ export class DashboardService {
   private async getDashboardMetadata() {
     const CACHE_TTL_MS = 5 * 60 * 1000;
     const now = Date.now();
-    if (this.metadataCache && now - this.metadataCache.timestamp < CACHE_TTL_MS) {
+    if (
+      this.metadataCache &&
+      now - this.metadataCache.timestamp < CACHE_TTL_MS
+    ) {
       return this.metadataCache.data;
     }
 
-    const [colleges, courses, teams, employees, leadStatuses] = await Promise.all([
-      this.prisma.college.findMany({
-        select: { id: true, name: true, city: true, state: true },
-        orderBy: { name: 'asc' },
-      }),
-      this.prisma.course.findMany({
-        select: { id: true, name: true, collegeId: true },
-        orderBy: { name: 'asc' },
-      }),
-      this.prisma.team.findMany({
-        select: {
-          id: true,
-          name: true,
-          manager: { select: { firstName: true, lastName: true } },
-        },
-        orderBy: { name: 'asc' },
-      }),
-      this.prisma.user.findMany({
-        where: { status: 'ACTIVE' },
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          teamId: true,
-          team: { select: { name: true } },
-        },
-        orderBy: { firstName: 'asc' },
-      }),
-      this.prisma.leadStatus.findMany({
-        where: { isActive: true },
-        orderBy: { displayOrder: 'asc' },
-      }),
-    ]);
+    const [colleges, courses, teams, employees, leadStatuses] =
+      await Promise.all([
+        this.prisma.college.findMany({
+          select: { id: true, name: true, city: true, state: true },
+          orderBy: { name: 'asc' },
+        }),
+        this.prisma.course.findMany({
+          select: { id: true, name: true, collegeId: true },
+          orderBy: { name: 'asc' },
+        }),
+        this.prisma.team.findMany({
+          select: {
+            id: true,
+            name: true,
+            manager: { select: { firstName: true, lastName: true } },
+          },
+          orderBy: { name: 'asc' },
+        }),
+        this.prisma.user.findMany({
+          where: { status: 'ACTIVE' },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            teamId: true,
+            team: { select: { name: true } },
+          },
+          orderBy: { firstName: 'asc' },
+        }),
+        this.prisma.leadStatus.findMany({
+          where: { isActive: true },
+          orderBy: { displayOrder: 'asc' },
+        }),
+      ]);
 
     const data = { colleges, courses, teams, employees, leadStatuses };
     this.metadataCache = { timestamp: now, data };
@@ -249,8 +253,7 @@ export class DashboardService {
     };
     for (const item of interviews) {
       if (item.result in interviewResultsMap) {
-        interviewResultsMap[item.result as keyof typeof interviewResultsMap] +=
-          1;
+        interviewResultsMap[item.result] += 1;
       }
     }
     const interviewResults = [
@@ -286,10 +289,14 @@ export class DashboardService {
   }
 
   async getAdvisorDashboardStats(userId: string) {
-    await this.verifyUserRole(userId, ['PROGRAM_ADVISOR', 'ADVISOR', 'SALES', 'SUPER_ADMIN']);
+    await this.verifyUserRole(userId, [
+      'PROGRAM_ADVISOR',
+      'ADVISOR',
+      'SALES',
+      'SUPER_ADMIN',
+    ]);
 
     const [myLeads, myPitches, myTpcs, allStatuses] = await Promise.all([
-
       // Own assigned or created leads
       this.prisma.lead.findMany({
         where: {
@@ -467,12 +474,19 @@ export class DashboardService {
     tpcPeriod?: string,
     memberPeriod?: string,
   ) {
-    const callingUser = await this.verifyUserRole(userId, ['MANAGER', 'SUPER_ADMIN']);
-    const isSuperAdminUser = callingUser?.role?.name?.toUpperCase().includes('SUPER_ADMIN');
+    const callingUser = await this.verifyUserRole(userId, [
+      'MANAGER',
+      'SUPER_ADMIN',
+    ]);
+    const isSuperAdminUser = callingUser?.role?.name
+      ?.toUpperCase()
+      .includes('SUPER_ADMIN');
 
     // 1. Get teams managed by current user (or all teams if Super Admin)
     const managedTeams = await this.prisma.team.findMany({
-      where: isSuperAdminUser ? { isActive: true } : { managerId: userId, isActive: true },
+      where: isSuperAdminUser
+        ? { isActive: true }
+        : { managerId: userId, isActive: true },
       select: {
         id: true,
         name: true,
@@ -483,7 +497,6 @@ export class DashboardService {
         name: 'asc',
       },
     });
-
 
     // Determine target team IDs
     let targetTeamIds: number[] = [];
@@ -503,35 +516,39 @@ export class DashboardService {
     }
 
     // 2. Fetch team members belonging to accessible target teams (including Manager/Head of Team)
-    const targetTeams = managedTeams.filter((t) => targetTeamIds.includes(t.id));
-    const targetManagerIds = targetTeams.map((t) => t.managerId).filter(Boolean);
+    const targetTeams = managedTeams.filter((t) =>
+      targetTeamIds.includes(t.id),
+    );
+    const targetManagerIds = targetTeams
+      .map((t) => t.managerId)
+      .filter(Boolean);
 
     const teamMembers =
       targetTeamIds.length > 0
         ? await this.prisma.user.findMany({
-          where: {
-            OR: [
-              { teamId: { in: targetTeamIds } },
-              { id: { in: targetManagerIds } },
-            ],
-            status: 'ACTIVE',
-          },
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            teamId: true,
-            team: {
-              select: {
-                name: true,
+            where: {
+              OR: [
+                { teamId: { in: targetTeamIds } },
+                { id: { in: targetManagerIds } },
+              ],
+              status: 'ACTIVE',
+            },
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              teamId: true,
+              team: {
+                select: {
+                  name: true,
+                },
               },
             },
-          },
-          orderBy: {
-            firstName: 'asc',
-          },
-        })
+            orderBy: {
+              firstName: 'asc',
+            },
+          })
         : [];
 
     const memberIds = teamMembers.map((m) => m.id);
@@ -559,7 +576,12 @@ export class DashboardService {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    const [allLeadStatuses, assignedLeads, pendingPitches, todaysApplicationsPitches] = await Promise.all([
+    const [
+      allLeadStatuses,
+      assignedLeads,
+      pendingPitches,
+      todaysApplicationsPitches,
+    ] = await Promise.all([
       // Lead statuses
       this.prisma.leadStatus.findMany({
         where: { isActive: true },
@@ -605,17 +627,17 @@ export class DashboardService {
       // Today's applications pitched by team members (unique student pitches)
       memberIds.length > 0
         ? this.prisma.leadCollege.findMany({
-          where: {
-            pitchedById: { in: memberIds },
-            createdAt: {
-              gte: startOfToday,
-              lte: endOfToday,
+            where: {
+              pitchedById: { in: memberIds },
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
             },
-          },
-          select: {
-            leadId: true,
-          },
-        })
+            select: {
+              leadId: true,
+            },
+          })
         : [],
     ]);
 
@@ -626,11 +648,11 @@ export class DashboardService {
           assignedToId: { in: memberIds },
           ...(startDate || endDate
             ? {
-              assignedAt: {
-                ...(startDate && { gte: startDate }),
-                ...(endDate && { lte: endDate }),
-              },
-            }
+                assignedAt: {
+                  ...(startDate && { gte: startDate }),
+                  ...(endDate && { lte: endDate }),
+                },
+              }
             : {}),
         },
         include: {
@@ -653,11 +675,11 @@ export class DashboardService {
           createdById: { in: memberIds },
           ...(startDate || endDate
             ? {
-              createdAt: {
-                ...(startDate && { gte: startDate }),
-                ...(endDate && { lte: endDate }),
-              },
-            }
+                createdAt: {
+                  ...(startDate && { gte: startDate }),
+                  ...(endDate && { lte: endDate }),
+                },
+              }
             : {}),
         },
         include: {
@@ -678,11 +700,11 @@ export class DashboardService {
           userId: { in: memberIds },
           ...(startDate || endDate
             ? {
-              createdAt: {
-                ...(startDate && { gte: startDate }),
-                ...(endDate && { lte: endDate }),
-              },
-            }
+                createdAt: {
+                  ...(startDate && { gte: startDate }),
+                  ...(endDate && { lte: endDate }),
+                },
+              }
             : {}),
         },
         include: {
@@ -695,77 +717,83 @@ export class DashboardService {
       }),
     ]);
 
-    const [todayAttendance, notifications, leadsTodayRecords, allTeamLeads] = await Promise.all([
-      // Attendance records for today
-      this.prisma.attendance.findMany({
-        where: {
-          userId: { in: memberIds },
-          date: {
-            gte: startOfToday,
-            lte: endOfToday,
-          },
-        },
-      }),
-
-      // Notifications for the manager
-      this.prisma.notificationRecipient.findMany({
-        where: { userId },
-        include: {
-          notification: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-      }),
-
-      // Leads created/posted today by team members or assigned to team members today
-      memberIds.length > 0
-        ? this.prisma.lead.findMany({
+    const [todayAttendance, notifications, leadsTodayRecords, allTeamLeads] =
+      await Promise.all([
+        // Attendance records for today
+        this.prisma.attendance.findMany({
           where: {
-            OR: [
-              { createdById: { in: memberIds } },
-              { assignments: { some: { userId: { in: memberIds } } } },
-            ],
-            createdAt: {
+            userId: { in: memberIds },
+            date: {
               gte: startOfToday,
               lte: endOfToday,
             },
           },
+        }),
+
+        // Notifications for the manager
+        this.prisma.notificationRecipient.findMany({
+          where: { userId },
           include: {
-            status: true,
-            createdBy: {
-              select: { id: true, firstName: true, lastName: true, email: true },
-            },
-            assignments: {
-              where: { status: 'ACTIVE' },
-              include: {
-                user: {
-                  select: { id: true, firstName: true, lastName: true },
-                },
-              },
-            },
+            notification: true,
           },
           orderBy: { createdAt: 'desc' },
-        })
-        : [],
+          take: 5,
+        }),
 
-      // All team leads (created by or assigned to team members + manager)
-      memberIds.length > 0
-        ? this.prisma.lead.findMany({
-          where: {
-            OR: [
-              { createdById: { in: memberIds } },
-              { assignments: { some: { userId: { in: memberIds } } } },
-            ],
-          },
-          include: {
-            status: true,
-            interactions: {
-              select: { id: true, createdAt: true },
-            },
-          },
-        })
-        : [],
-    ]);
+        // Leads created/posted today by team members or assigned to team members today
+        memberIds.length > 0
+          ? this.prisma.lead.findMany({
+              where: {
+                OR: [
+                  { createdById: { in: memberIds } },
+                  { assignments: { some: { userId: { in: memberIds } } } },
+                ],
+                createdAt: {
+                  gte: startOfToday,
+                  lte: endOfToday,
+                },
+              },
+              include: {
+                status: true,
+                createdBy: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                  },
+                },
+                assignments: {
+                  where: { status: 'ACTIVE' },
+                  include: {
+                    user: {
+                      select: { id: true, firstName: true, lastName: true },
+                    },
+                  },
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+            })
+          : [],
+
+        // All team leads (created by or assigned to team members + manager)
+        memberIds.length > 0
+          ? this.prisma.lead.findMany({
+              where: {
+                OR: [
+                  { createdById: { in: memberIds } },
+                  { assignments: { some: { userId: { in: memberIds } } } },
+                ],
+              },
+              include: {
+                status: true,
+                interactions: {
+                  select: { id: true, createdAt: true },
+                },
+              },
+            })
+          : [],
+      ]);
 
     // 5. Deduplicate unique team leads (Manager + Team Members)
     const leadMap = new Map<string, any>();
@@ -805,12 +833,17 @@ export class DashboardService {
     const totalMembers = teamMembers.length;
     const totalLeads = uniqueLeads.length;
     const totalTpcs = tpcAssignments.length;
-    const pendingTpcsCount = tpcAssignments.filter((t) => t.status === 'PENDING').length;
+    const pendingTpcsCount = tpcAssignments.filter(
+      (t) => t.status === 'PENDING',
+    ).length;
     const pendingPitchesCount = pendingPitches.length;
     const pendingActions = pendingTpcsCount + pendingPitchesCount;
 
     // Calculate the 4 manager dashboard overview metrics
-    const uniqueLeadsTodayMap = new Map<string, (typeof leadsTodayRecords)[0]>();
+    const uniqueLeadsTodayMap = new Map<
+      string,
+      (typeof leadsTodayRecords)[0]
+    >();
     for (const record of leadsTodayRecords) {
       if (!uniqueLeadsTodayMap.has(record.id)) {
         uniqueLeadsTodayMap.set(record.id, record);
@@ -864,14 +897,19 @@ export class DashboardService {
     const teamPerformance = managedTeams
       .filter((t) => targetTeamIds.includes(t.id))
       .map((team) => {
-        const membersInTeam = teamMembers.filter((m) => m.teamId === team.id || m.id === team.managerId);
+        const membersInTeam = teamMembers.filter(
+          (m) => m.teamId === team.id || m.id === team.managerId,
+        );
         const memberIdsInTeam = membersInTeam.map((m) => m.id);
 
         const leadsInTeam = assignedLeads.filter((a) =>
           memberIdsInTeam.includes(a.userId),
         );
         // Unique leads/students in team
-        const uniqueLeadsInTeamMap = new Map<string, (typeof assignedLeads)[0]['lead']>();
+        const uniqueLeadsInTeamMap = new Map<
+          string,
+          (typeof assignedLeads)[0]['lead']
+        >();
         for (const a of leadsInTeam) {
           if (a.lead && !uniqueLeadsInTeamMap.has(a.leadId)) {
             uniqueLeadsInTeamMap.set(a.leadId, a.lead);
@@ -890,8 +928,12 @@ export class DashboardService {
         const tpcsInTeam = tpcAssignments.filter((t) =>
           memberIdsInTeam.includes(t.assignedToId),
         );
-        const pendingTpcs = tpcsInTeam.filter((t) => t.status === 'PENDING').length;
-        const completedTpcs = tpcsInTeam.filter((t) => t.status === 'COMPLETED').length;
+        const pendingTpcs = tpcsInTeam.filter(
+          (t) => t.status === 'PENDING',
+        ).length;
+        const completedTpcs = tpcsInTeam.filter(
+          (t) => t.status === 'COMPLETED',
+        ).length;
 
         return {
           teamId: team.id,
@@ -936,7 +978,8 @@ export class DashboardService {
       pipelineUniqueLeads = uniqueLeads.filter((l) => {
         const cDate = new Date(l.createdAt);
         const uDate = new Date(l.updatedAt);
-        if (pStartDate && cDate < pStartDate && uDate < pStartDate) return false;
+        if (pStartDate && cDate < pStartDate && uDate < pStartDate)
+          return false;
         if (pEndDate && cDate > pEndDate && uDate > pEndDate) return false;
         return true;
       });
@@ -945,14 +988,19 @@ export class DashboardService {
     const totalPipelineLeads = pipelineUniqueLeads.length;
 
     const leadPipeline = allLeadStatuses.map((st) => {
-      const count = pipelineUniqueLeads.filter((l) => l.statusId === st.id).length;
+      const count = pipelineUniqueLeads.filter(
+        (l) => l.statusId === st.id,
+      ).length;
       return {
         id: st.id,
         name: st.name,
         color: st.color,
         description: st.description,
         count,
-        percentage: totalPipelineLeads > 0 ? Math.round((count / totalPipelineLeads) * 100) : 0,
+        percentage:
+          totalPipelineLeads > 0
+            ? Math.round((count / totalPipelineLeads) * 100)
+            : 0,
       };
     });
 
@@ -984,7 +1032,10 @@ export class DashboardService {
       const memberLeadItems: any[] = [];
       for (const a of assignedLeads) {
         if (a.userId === member.id && a.lead) {
-          memberLeadItems.push({ lead: a.lead, timestamp: a.assignedAt || a.createdAt });
+          memberLeadItems.push({
+            lead: a.lead,
+            timestamp: a.assignedAt || a.createdAt,
+          });
         }
       }
       for (const l of allTeamLeads) {
@@ -1026,7 +1077,9 @@ export class DashboardService {
       }).length;
 
       // TPC Assigned & TPC Attempted for member in memberPeriod
-      const memberTpcsAll = tpcAssignments.filter((t) => t.assignedToId === member.id);
+      const memberTpcsAll = tpcAssignments.filter(
+        (t) => t.assignedToId === member.id,
+      );
       const filteredMemberTpcs = memberTpcsAll.filter((t) => {
         if (!mStartDate || !mEndDate) return true;
         const tDate = new Date(t.assignedAt || t.createdAt);
@@ -1039,11 +1092,15 @@ export class DashboardService {
       const tpcAttemptedCount = filteredMemberTpcs.filter((t) => {
         if (t.status === 'PENDING') return false;
         if (!mStartDate || !mEndDate) return true;
-        const actionDate = new Date(t.completedAt || t.assignedAt || t.createdAt);
+        const actionDate = new Date(
+          t.completedAt || t.assignedAt || t.createdAt,
+        );
         return actionDate >= mStartDate && actionDate <= mEndDate;
       }).length;
 
-      const pendingTpcsCount = filteredMemberTpcs.filter((t) => t.status === 'PENDING').length;
+      const pendingTpcsCount = filteredMemberTpcs.filter(
+        (t) => t.status === 'PENDING',
+      ).length;
 
       // Interactions / Total Calls logged in memberPeriod
       const memberInteractions = interactions.filter((i) => {
@@ -1073,14 +1130,18 @@ export class DashboardService {
         lastActivityAt = new Date(Math.max(...timestamps)).toISOString();
       } else {
         // Fallback to overall latest activity timestamp if no activity in period
-        const overallInteractions = interactions.filter((i) => i.createdById === member.id);
+        const overallInteractions = interactions.filter(
+          (i) => i.createdById === member.id,
+        );
         const overallLogs = activityLogs.filter((a) => a.userId === member.id);
         const overallTimestamps = [
           ...overallInteractions.map((i) => new Date(i.createdAt).getTime()),
           ...overallLogs.map((l) => new Date(l.createdAt).getTime()),
         ];
         if (overallTimestamps.length > 0) {
-          lastActivityAt = new Date(Math.max(...overallTimestamps)).toISOString();
+          lastActivityAt = new Date(
+            Math.max(...overallTimestamps),
+          ).toISOString();
         }
       }
 
@@ -1091,7 +1152,9 @@ export class DashboardService {
 
       // DONE indicator: Member completed activity (has calls or attempted TPCs or assigned leads, and no pending TPCs)
       const isDone =
-        (totalCallsCount > 0 || tpcAttemptedCount > 0 || assignedLeadsCount > 0) &&
+        (totalCallsCount > 0 ||
+          tpcAttemptedCount > 0 ||
+          assignedLeadsCount > 0) &&
         pendingTpcsCount === 0;
 
       return {
@@ -1157,11 +1220,17 @@ export class DashboardService {
     }
 
     const tpcStatusCounts = {
-      PENDING: filteredTpcAssignments.filter((t) => t.status === 'PENDING').length,
-      COMPLETED: filteredTpcAssignments.filter((t) => t.status === 'COMPLETED').length,
-      NO_REPLY: filteredTpcAssignments.filter((t) => t.status === 'NO_REPLY').length,
-      NOT_INTERESTED: filteredTpcAssignments.filter((t) => t.status === 'NOT_INTERESTED').length,
-      CANCELLED: filteredTpcAssignments.filter((t) => t.status === 'CANCELLED').length,
+      PENDING: filteredTpcAssignments.filter((t) => t.status === 'PENDING')
+        .length,
+      COMPLETED: filteredTpcAssignments.filter((t) => t.status === 'COMPLETED')
+        .length,
+      NO_REPLY: filteredTpcAssignments.filter((t) => t.status === 'NO_REPLY')
+        .length,
+      NOT_INTERESTED: filteredTpcAssignments.filter(
+        (t) => t.status === 'NOT_INTERESTED',
+      ).length,
+      CANCELLED: filteredTpcAssignments.filter((t) => t.status === 'CANCELLED')
+        .length,
     };
 
     const tpcByMember = teamMembers.map((m) => {
@@ -1170,7 +1239,8 @@ export class DashboardService {
         memberId: m.id,
         name: `${m.firstName} ${m.lastName || ''}`.trim(),
         pendingCount: memberTpcs.filter((t) => t.status === 'PENDING').length,
-        completedCount: memberTpcs.filter((t) => t.status === 'COMPLETED').length,
+        completedCount: memberTpcs.filter((t) => t.status === 'COMPLETED')
+          .length,
       };
     });
 
@@ -1190,7 +1260,8 @@ export class DashboardService {
         leadName: t.tpc.lead
           ? `${t.tpc.lead.firstName} ${t.tpc.lead.lastName || ''}`.trim()
           : 'Lead',
-        assignedTo: `${t.assignedTo.firstName} ${t.assignedTo.lastName || ''}`.trim(),
+        assignedTo:
+          `${t.assignedTo.firstName} ${t.assignedTo.lastName || ''}`.trim(),
         assignedAt: t.assignedAt,
       }));
 
@@ -1206,11 +1277,21 @@ export class DashboardService {
       }));
 
     // 12. Attendance Summary for Today
-    const presentCount = todayAttendance.filter((a) => a.status === 'PRESENT').length;
-    const absentCount = todayAttendance.filter((a) => a.status === 'ABSENT').length;
-    const halfDayCount = todayAttendance.filter((a) => a.status === 'HALF_DAY').length;
-    const leaveCount = todayAttendance.filter((a) => a.status === 'LEAVE').length;
-    const unmarkedCount = teamMembers.length - (presentCount + absentCount + halfDayCount + leaveCount);
+    const presentCount = todayAttendance.filter(
+      (a) => a.status === 'PRESENT',
+    ).length;
+    const absentCount = todayAttendance.filter(
+      (a) => a.status === 'ABSENT',
+    ).length;
+    const halfDayCount = todayAttendance.filter(
+      (a) => a.status === 'HALF_DAY',
+    ).length;
+    const leaveCount = todayAttendance.filter(
+      (a) => a.status === 'LEAVE',
+    ).length;
+    const unmarkedCount =
+      teamMembers.length -
+      (presentCount + absentCount + halfDayCount + leaveCount);
 
     // 13. Recent Activity Feed
     const combinedActivity = [
@@ -1229,7 +1310,10 @@ export class DashboardService {
         createdAt: a.createdAt,
       })),
     ]
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )
       .slice(0, 15);
 
     // 14. Notifications Summary
@@ -1269,7 +1353,8 @@ export class DashboardService {
           id: p.id,
           leadName: `${p.lead.firstName} ${p.lead.lastName || ''}`.trim(),
           collegeName: p.college.name,
-          pitchedBy: `${p.pitchedBy.firstName} ${p.pitchedBy.lastName || ''}`.trim(),
+          pitchedBy:
+            `${p.pitchedBy.firstName} ${p.pitchedBy.lastName || ''}`.trim(),
         })),
         inactiveMembersCount: inactiveMembers.length,
         inactiveMembers,
@@ -1325,26 +1410,43 @@ export class DashboardService {
       todayAttendances,
       allActiveUsers,
       recentActivityLogs,
+      activeDataAssignments,
+      admissionDoneLeads,
     ] = await Promise.all([
       // 1. All active teams with manager and members (users)
       this.prisma.team.findMany({
         where: { isActive: true },
         include: {
-          manager: { select: { id: true, firstName: true, lastName: true, email: true } },
-          users: { select: { id: true, firstName: true, lastName: true, email: true } },
+          manager: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+          users: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
         },
         orderBy: { name: 'asc' },
       }),
 
-      // 2. All active advisors (sales & program advisor roles or team members)
+      // 2. All active advisors (sales & program advisor roles)
       this.prisma.user.findMany({
-        where: { status: 'ACTIVE' },
+        where: {
+          status: 'ACTIVE',
+          OR: [
+            { role: { name: { contains: 'Advisor', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Sales', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Counselor', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Counsellor', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Executive', mode: 'insensitive' } } },
+          ],
+        },
         include: {
           team: {
             select: {
               id: true,
               name: true,
-              manager: { select: { id: true, firstName: true, lastName: true } },
+              manager: {
+                select: { id: true, firstName: true, lastName: true },
+              },
             },
           },
           role: { select: { id: true, name: true } },
@@ -1359,7 +1461,9 @@ export class DashboardService {
         },
         include: {
           status: true,
-          createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
+          createdBy: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
           assignments: {
             where: { status: 'ACTIVE' },
             include: {
@@ -1372,7 +1476,9 @@ export class DashboardService {
                     select: {
                       id: true,
                       name: true,
-                      manager: { select: { id: true, firstName: true, lastName: true } },
+                      manager: {
+                        select: { id: true, firstName: true, lastName: true },
+                      },
                     },
                   },
                 },
@@ -1400,7 +1506,9 @@ export class DashboardService {
                 select: {
                   id: true,
                   name: true,
-                  manager: { select: { id: true, firstName: true, lastName: true } },
+                  manager: {
+                    select: { id: true, firstName: true, lastName: true },
+                  },
                 },
               },
             },
@@ -1434,12 +1542,18 @@ export class DashboardService {
           },
           tpc: {
             include: {
-              lead: { select: { id: true, firstName: true, lastName: true, phone: true } },
+              lead: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  phone: true,
+                },
+              },
             },
           },
         },
       }),
-
 
       // 6. Interviews scheduled or conducted today
       this.prisma.interview.findMany({
@@ -1457,7 +1571,9 @@ export class DashboardService {
                 select: {
                   id: true,
                   name: true,
-                  manager: { select: { id: true, firstName: true, lastName: true } },
+                  manager: {
+                    select: { id: true, firstName: true, lastName: true },
+                  },
                 },
               },
             },
@@ -1487,7 +1603,9 @@ export class DashboardService {
                     select: {
                       id: true,
                       name: true,
-                      manager: { select: { id: true, firstName: true, lastName: true } },
+                      manager: {
+                        select: { id: true, firstName: true, lastName: true },
+                      },
                     },
                   },
                 },
@@ -1501,7 +1619,16 @@ export class DashboardService {
       // 8. Admissions due today
       this.prisma.lead.findMany({
         where: {
-          status: { name: { in: ['APPLICATION', 'INTERVIEW_SCHEDULED', 'INTERVIEW_DONE', 'LETTER_OUT'] } },
+          status: {
+            name: {
+              in: [
+                'APPLICATION',
+                'INTERVIEW_SCHEDULED',
+                'INTERVIEW_DONE',
+                'LETTER_OUT',
+              ],
+            },
+          },
           updatedAt: { gte: startOfToday, lte: endOfToday },
         },
         include: {
@@ -1519,7 +1646,9 @@ export class DashboardService {
                     select: {
                       id: true,
                       name: true,
-                      manager: { select: { id: true, firstName: true, lastName: true } },
+                      manager: {
+                        select: { id: true, firstName: true, lastName: true },
+                      },
                     },
                   },
                 },
@@ -1542,7 +1671,11 @@ export class DashboardService {
 
       // 11. Leads for pipeline distribution
       this.prisma.lead.findMany({
-        select: { id: true, statusId: true, status: { select: { name: true } } },
+        select: {
+          id: true,
+          statusId: true,
+          status: { select: { name: true } },
+        },
       }),
 
       // 12. StudentData unassigned count
@@ -1581,7 +1714,9 @@ export class DashboardService {
                 select: {
                   id: true,
                   name: true,
-                  manager: { select: { id: true, firstName: true, lastName: true } },
+                  manager: {
+                    select: { id: true, firstName: true, lastName: true },
+                  },
                 },
               },
             },
@@ -1602,7 +1737,9 @@ export class DashboardService {
             select: {
               id: true,
               name: true,
-              manager: { select: { id: true, firstName: true, lastName: true } },
+              manager: {
+                select: { id: true, firstName: true, lastName: true },
+              },
             },
           },
         },
@@ -1614,7 +1751,36 @@ export class DashboardService {
         orderBy: { createdAt: 'desc' },
         include: {
           user: {
-            select: { id: true, firstName: true, lastName: true, username: true },
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              username: true,
+            },
+          },
+        },
+      }),
+
+      // 19. Active DataAssignments for assignedDataCount per advisor
+      this.prisma.dataAssignment.findMany({
+        where: { status: 'ACTIVE' },
+        select: {
+          assignedToId: true,
+          _count: { select: { items: true } },
+        },
+      }),
+
+      // 20. Admission Done leads for admissionsCount per advisor
+      this.prisma.lead.findMany({
+        where: {
+          status: { name: 'ADMISSION_DONE' },
+        },
+        select: {
+          id: true,
+          createdById: true,
+          assignments: {
+            where: { status: 'ACTIVE' },
+            select: { userId: true },
           },
         },
       }),
@@ -1626,8 +1792,11 @@ export class DashboardService {
       const assignedUser = activeAssign?.user;
       const teamObj = assignedUser?.team;
       const managerObj = teamObj?.manager;
-      const primaryCollege = l.collegeApplications[0]?.college?.name || 'Not Available';
-      const lastAct = l.interactions[0]?.createdAt ? l.interactions[0].createdAt.toISOString() : l.updatedAt.toISOString();
+      const primaryCollege =
+        l.collegeApplications[0]?.college?.name || 'Not Available';
+      const lastAct = l.interactions[0]?.createdAt
+        ? l.interactions[0].createdAt.toISOString()
+        : l.updatedAt.toISOString();
 
       return {
         id: l.id,
@@ -1636,14 +1805,19 @@ export class DashboardService {
         email: l.email || 'Not Available',
         college: primaryCollege,
         createdAt: l.createdAt.toISOString(),
-        createdBy: `${l.createdBy.firstName} ${l.createdBy.lastName || ''}`.trim(),
+        createdBy:
+          `${l.createdBy.firstName} ${l.createdBy.lastName || ''}`.trim(),
         createdById: l.createdById,
         status: l.status.name,
-        assignedAdvisor: assignedUser ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim() : 'Unassigned',
+        assignedAdvisor: assignedUser
+          ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim()
+          : 'Unassigned',
         assignedAdvisorId: assignedUser?.id || null,
         team: teamObj?.name || 'Unassigned',
         teamId: teamObj?.id || null,
-        manager: managerObj ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim() : 'Unassigned',
+        manager: managerObj
+          ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim()
+          : 'Unassigned',
         lastActivity: lastAct,
       };
     });
@@ -1658,11 +1832,14 @@ export class DashboardService {
           student: `${i.lead.firstName} ${i.lead.lastName || ''}`.trim(),
           leadId: i.lead.id,
           phone: i.lead.phone,
-          advisor: `${i.createdBy.firstName} ${i.createdBy.lastName || ''}`.trim(),
+          advisor:
+            `${i.createdBy.firstName} ${i.createdBy.lastName || ''}`.trim(),
           advisorId: i.createdById,
           team: advTeam?.name || 'Unassigned',
           teamId: advTeam?.id || null,
-          manager: advManager ? `${advManager.firstName} ${advManager.lastName || ''}`.trim() : 'Unassigned',
+          manager: advManager
+            ? `${advManager.firstName} ${advManager.lastName || ''}`.trim()
+            : 'Unassigned',
           callTime: i.createdAt.toISOString(),
           duration: 'Not Available',
           callOutcome: i.title || i.description.slice(0, 40) || 'Logged Call',
@@ -1671,10 +1848,14 @@ export class DashboardService {
       }),
       ...todaysTpcUsers.map((t) => ({
         id: t.id,
-        student: t.tpc?.lead ? `${t.tpc.lead.firstName} ${t.tpc.lead.lastName || ''}`.trim() : 'Lead',
+        student: t.tpc?.lead
+          ? `${t.tpc.lead.firstName} ${t.tpc.lead.lastName || ''}`.trim()
+          : 'Lead',
         leadId: t.tpc?.lead?.id || null,
         phone: t.tpc?.lead?.phone || 'Not Available',
-        advisor: t.assignedTo ? `${t.assignedTo.firstName} ${t.assignedTo.lastName || ''}`.trim() : 'Advisor',
+        advisor: t.assignedTo
+          ? `${t.assignedTo.firstName} ${t.assignedTo.lastName || ''}`.trim()
+          : 'Advisor',
         advisorId: t.assignedToId,
         team: t.assignedTo?.team?.name || 'Unassigned',
         teamId: t.assignedTo?.team?.id || null,
@@ -1684,8 +1865,9 @@ export class DashboardService {
         callOutcome: `TPC: ${t.status}`,
         leadStatus: 'TPC',
       })),
-
-    ].sort((a, b) => new Date(b.callTime).getTime() - new Date(a.callTime).getTime());
+    ].sort(
+      (a, b) => new Date(b.callTime).getTime() - new Date(a.callTime).getTime(),
+    );
 
     // Format 3. Attendance Today List
     const attendanceUserIds = new Set(todayAttendances.map((a) => a.userId));
@@ -1700,7 +1882,7 @@ export class DashboardService {
         manager: a.user.team?.manager
           ? `${a.user.team.manager.firstName} ${a.user.team.manager.lastName || ''}`.trim()
           : 'Unassigned',
-        status: a.status as string,
+        status: a.status,
         checkIn: a.checkIn ? a.checkIn.toISOString() : '09:30 AM',
         checkOut: a.checkOut ? a.checkOut.toISOString() : '06:30 PM',
         workingHours: '8 hrs 30 mins',
@@ -1724,21 +1906,29 @@ export class DashboardService {
         })),
     ];
 
-    const presentCount = attendanceList.filter((a) => a.status === 'PRESENT').length;
-    const absentCount = attendanceList.filter((a) => a.status === 'ABSENT').length;
-    const leaveCount = attendanceList.filter((a) => a.status === 'LEAVE').length;
+    const presentCount = attendanceList.filter(
+      (a) => a.status === 'PRESENT',
+    ).length;
+    const absentCount = attendanceList.filter(
+      (a) => a.status === 'ABSENT',
+    ).length;
+    const leaveCount = attendanceList.filter(
+      (a) => a.status === 'LEAVE',
+    ).length;
 
     // Format 4. Interviews Today List
     const interviewsList = todaysInterviews.map((i) => ({
       id: i.id,
-      candidateName: `${i.candidate.firstName} ${i.candidate.lastName || ''}`.trim(),
+      candidateName:
+        `${i.candidate.firstName} ${i.candidate.lastName || ''}`.trim(),
       candidateId: i.candidate.id,
       interviewTime: i.scheduledAt.toISOString(),
       college: 'Not Available',
       course: i.candidate.position?.title || 'General Applicant',
       status: i.status,
       result: i.result,
-      advisor: `${i.interviewer.firstName} ${i.interviewer.lastName || ''}`.trim(),
+      advisor:
+        `${i.interviewer.firstName} ${i.interviewer.lastName || ''}`.trim(),
       advisorId: i.interviewer.id,
       team: i.interviewer.team?.name || 'Unassigned',
       teamId: i.interviewer.team?.id || null,
@@ -1747,9 +1937,15 @@ export class DashboardService {
         : 'Unassigned',
     }));
 
-    const interviewsScheduledCount = interviewsList.filter((i) => i.status === 'SCHEDULED').length;
-    const interviewsCompletedCount = interviewsList.filter((i) => i.status === 'COMPLETED').length;
-    const interviewsPendingCount = interviewsList.filter((i) => i.result === 'PENDING').length;
+    const interviewsScheduledCount = interviewsList.filter(
+      (i) => i.status === 'SCHEDULED',
+    ).length;
+    const interviewsCompletedCount = interviewsList.filter(
+      (i) => i.status === 'COMPLETED',
+    ).length;
+    const interviewsPendingCount = interviewsList.filter(
+      (i) => i.result === 'PENDING',
+    ).length;
 
     // Format 5. Selection Letters Out Today List
     const lettersOutList = todaysLetterOutLeads.map((l) => {
@@ -1765,11 +1961,15 @@ export class DashboardService {
         course: l.courseInterested || 'Selected Program',
         letterStatus: 'ISSUED',
         issuedTime: l.updatedAt.toISOString(),
-        advisor: assignedUser ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim() : 'Unassigned',
+        advisor: assignedUser
+          ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim()
+          : 'Unassigned',
         advisorId: assignedUser?.id || null,
         team: teamObj?.name || 'Unassigned',
         teamId: teamObj?.id || null,
-        manager: managerObj ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim() : 'Unassigned',
+        manager: managerObj
+          ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim()
+          : 'Unassigned',
       };
     });
 
@@ -1779,7 +1979,9 @@ export class DashboardService {
       const assignedUser = activeAssign?.user;
       const teamObj = assignedUser?.team;
       const managerObj = teamObj?.manager;
-      const lastAct = l.interactions[0]?.createdAt ? l.interactions[0].createdAt.toISOString() : l.updatedAt.toISOString();
+      const lastAct = l.interactions[0]?.createdAt
+        ? l.interactions[0].createdAt.toISOString()
+        : l.updatedAt.toISOString();
 
       return {
         id: l.id,
@@ -1788,11 +1990,15 @@ export class DashboardService {
         course: l.courseInterested || 'Interested Program',
         admissionLastDate: l.createdAt.toISOString().split('T')[0],
         status: l.status.name,
-        advisor: assignedUser ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim() : 'Unassigned',
+        advisor: assignedUser
+          ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim()
+          : 'Unassigned',
         advisorId: assignedUser?.id || null,
         team: teamObj?.name || 'Unassigned',
         teamId: teamObj?.id || null,
-        manager: managerObj ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim() : 'Unassigned',
+        manager: managerObj
+          ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim()
+          : 'Unassigned',
         lastActivity: lastAct,
       };
     });
@@ -1802,11 +2008,15 @@ export class DashboardService {
       const memberIds = team.users.map((m) => m.id);
 
       const teamLeadsTodayCount = leadsTodayList.filter(
-        (l) => l.teamId === team.id || (l.assignedAdvisorId && memberIds.includes(l.assignedAdvisorId)),
+        (l) =>
+          l.teamId === team.id ||
+          (l.assignedAdvisorId && memberIds.includes(l.assignedAdvisorId)),
       ).length;
 
       const teamCallsTodayCount = callsTodayList.filter(
-        (c) => c.teamId === team.id || (c.advisorId && memberIds.includes(c.advisorId)),
+        (c) =>
+          c.teamId === team.id ||
+          (c.advisorId && memberIds.includes(c.advisorId)),
       ).length;
 
       const teamAdmissionsTodayCount = allLeadsForPipeline.filter(
@@ -1833,22 +2043,49 @@ export class DashboardService {
       };
     });
 
-
     // Format 8. Program Advisor Performance Table
-    const advisorPerformance = allAdvisors.map((adv) => {
+    const uniqueAdvisorMap = new Map<string, (typeof allAdvisors)[0]>();
+    for (const adv of allAdvisors) {
+      if (!uniqueAdvisorMap.has(adv.id)) {
+        uniqueAdvisorMap.set(adv.id, adv);
+      }
+    }
+    const uniqueAdvisors = Array.from(uniqueAdvisorMap.values());
+
+    const assignedDataMap = new Map<string, number>();
+    for (const da of activeDataAssignments) {
+      const count = assignedDataMap.get(da.assignedToId) || 0;
+      assignedDataMap.set(da.assignedToId, count + (da._count?.items || 0));
+    }
+
+    const advisorAdmissionsMap = new Map<string, number>();
+    for (const lead of admissionDoneLeads) {
+      const assignedUserId = lead.assignments[0]?.userId;
+      const targetUserId = assignedUserId || lead.createdById;
+      if (targetUserId) {
+        const curr = advisorAdmissionsMap.get(targetUserId) || 0;
+        advisorAdmissionsMap.set(targetUserId, curr + 1);
+      }
+    }
+
+    const advisorPerformance = uniqueAdvisors.map((adv) => {
       const advName = `${adv.firstName} ${adv.lastName || ''}`.trim();
 
-      const assignedLeads = allLeadsForPipeline.length;
-      const advCallsToday = callsTodayList.filter((c) => c.advisorId === adv.id).length;
-      const advLeadsCreated = leadsTodayList.filter((l) => l.createdById === adv.id || l.assignedAdvisorId === adv.id).length;
-      const advAdmissions = 0;
+      const advCallsToday = callsTodayList.filter(
+        (c) => c.advisorId === adv.id,
+      ).length;
+      const advLeadsCreated = leadsTodayList.filter(
+        (l) => l.createdById === adv.id || l.assignedAdvisorId === adv.id,
+      ).length;
+      const advAssignedData = assignedDataMap.get(adv.id) || 0;
+      const advAdmissions = advisorAdmissionsMap.get(adv.id) || 0;
 
       return {
         userId: adv.id,
         advisorName: advName,
         teamName: adv.team?.name || 'Unassigned',
         teamId: adv.team?.id || null,
-        assignedDataCount: Math.min(assignedLeads, 120),
+        assignedDataCount: advAssignedData,
         callsCount: advCallsToday,
         leadsCount: advLeadsCreated,
         admissionsCount: advAdmissions,
@@ -1857,18 +2094,23 @@ export class DashboardService {
 
     // Format 9. Lead Pipeline Distribution
     const leadPipeline = allLeadStatuses.map((st) => {
-      const count = allLeadsForPipeline.filter((l) => l.statusId === st.id).length;
+      const count = allLeadsForPipeline.filter(
+        (l) => l.statusId === st.id,
+      ).length;
       return {
         id: st.id,
         name: st.name,
         color: st.color,
         description: st.description,
         count,
-        percentage: totalLeadsCount > 0 ? Math.round((count / totalLeadsCount) * 100) : 0,
+        percentage:
+          totalLeadsCount > 0 ? Math.round((count / totalLeadsCount) * 100) : 0,
       };
     });
 
-    const zeroCallAdvisors = advisorPerformance.filter((a) => a.callsCount === 0);
+    const zeroCallAdvisors = advisorPerformance.filter(
+      (a) => a.callsCount === 0,
+    );
 
     return {
       kpis: {
@@ -1921,7 +2163,11 @@ export class DashboardService {
     userId?: string,
     filters: AdmissionsDashboardFilters = {},
   ) {
-    await this.verifyUserRole(userId, ['SUPER_ADMIN', 'PROGRAM_ADVISOR', 'MANAGER']);
+    await this.verifyUserRole(userId, [
+      'SUPER_ADMIN',
+      'PROGRAM_ADVISOR',
+      'MANAGER',
+    ]);
 
     const {
       startDate,
@@ -1955,7 +2201,10 @@ export class DashboardService {
 
     if (source) {
       whereLead.source = source as any;
-      whereLeadCollege.lead = { ...whereLeadCollege.lead, source: source as any };
+      whereLeadCollege.lead = {
+        ...whereLeadCollege.lead,
+        source: source as any,
+      };
     }
 
     if (collegeId) {
@@ -2109,7 +2358,9 @@ export class DashboardService {
       if (empId) {
         const emp = employeeStatsMap.get(empId) || {
           employeeId: empId,
-          employeeName: `${l.createdBy?.firstName || ''} ${l.createdBy?.lastName || ''}`.trim() || 'Unknown',
+          employeeName:
+            `${l.createdBy?.firstName || ''} ${l.createdBy?.lastName || ''}`.trim() ||
+            'Unknown',
           teamName: l.createdBy?.team?.name || 'Unassigned',
           leadsHandled: 0,
           admissions: 0,
@@ -2129,7 +2380,9 @@ export class DashboardService {
       if (empId) {
         const emp = employeeStatsMap.get(empId) || {
           employeeId: empId,
-          employeeName: `${lc.pitchedBy?.firstName || ''} ${lc.pitchedBy?.lastName || ''}`.trim() || 'Unknown',
+          employeeName:
+            `${lc.pitchedBy?.firstName || ''} ${lc.pitchedBy?.lastName || ''}`.trim() ||
+            'Unknown',
           teamName: lc.pitchedBy?.team?.name || 'Unassigned',
           leadsHandled: 0,
           admissions: 0,
@@ -2393,9 +2646,7 @@ export class DashboardService {
         color: st.color,
         count,
         percentage:
-          totalLeadsCount > 0
-            ? Math.round((count / totalLeadsCount) * 100)
-            : 0,
+          totalLeadsCount > 0 ? Math.round((count / totalLeadsCount) * 100) : 0,
       };
     });
 
@@ -2468,7 +2719,8 @@ export class DashboardService {
     const recentAdmissionsData = recentLeadColleges.map((rc) => ({
       id: rc.id,
       leadId: rc.leadId,
-      studentName: `${rc.lead?.firstName || 'Student'} ${rc.lead?.lastName || ''}`.trim(),
+      studentName:
+        `${rc.lead?.firstName || 'Student'} ${rc.lead?.lastName || ''}`.trim(),
       phone: rc.lead?.phone || 'N/A',
       email: rc.lead?.email || 'N/A',
       city: rc.lead?.city || rc.college?.city || 'N/A',
@@ -2505,17 +2757,17 @@ export class DashboardService {
             : 0,
         topCounselor: topCounselorObj
           ? {
-            name: topCounselorObj.employeeName,
-            admissions: topCounselorObj.admissions,
-            team: topCounselorObj.teamName,
-          }
+              name: topCounselorObj.employeeName,
+              admissions: topCounselorObj.admissions,
+              team: topCounselorObj.teamName,
+            }
           : null,
         topConverter: topConverterObj
           ? {
-            name: topConverterObj.employeeName,
-            conversionRate: topConverterObj.conversionRate,
-            team: topConverterObj.teamName,
-          }
+              name: topConverterObj.employeeName,
+              conversionRate: topConverterObj.conversionRate,
+              team: topConverterObj.teamName,
+            }
           : null,
       },
       filtersMeta: {
@@ -2553,5 +2805,3 @@ export class DashboardService {
     };
   }
 }
-
-

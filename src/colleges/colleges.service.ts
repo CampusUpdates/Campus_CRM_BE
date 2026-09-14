@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationsService } from 'src/notifications/notifications.service';
+import { ActivityLogService } from 'src/activity-log/activity-log.service';
+import { ActivityType } from '@prisma/client';
 import { CreateCollegeDto } from './dto/create-college.dto';
 import { UpdateCollegeDto } from './dto/update-college.dto';
 
@@ -13,7 +15,8 @@ export class CollegesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
-  ) { }
+    private readonly activityLogService: ActivityLogService,
+  ) {}
 
   async create(createCollegeDto: CreateCollegeDto) {
     const existingCollege = await this.prisma.college.findUnique({
@@ -29,7 +32,19 @@ export class CollegesService {
     });
   }
 
-  async findAll(query?: {
+  async findAllActive(query?: {
+    search?: string;
+    hasTieUp?: string;
+    state?: string;
+    city?: string;
+  }) {
+    return this.findAllManagement({
+      ...query,
+      isActive: 'true',
+    });
+  }
+
+  async findAllManagement(query?: {
     search?: string;
     isActive?: string;
     hasTieUp?: string;
@@ -137,6 +152,31 @@ export class CollegesService {
     });
   }
 
+  async updateStatus(id: string, isActive: boolean, userId: string) {
+    const college = await this.prisma.college.findUnique({
+      where: { id },
+    });
+
+    if (!college) {
+      throw new NotFoundException('College not found');
+    }
+
+    const updated = await this.prisma.college.update({
+      where: { id },
+      data: { isActive },
+    });
+
+    await this.activityLogService.createLog({
+      userId,
+      activity: ActivityType.COLLEGE,
+      entityType: 'COLLEGE',
+      entityId: id,
+      description: `College ${college.name} ${isActive ? 'activated' : 'deactivated'}`,
+    });
+
+    return updated;
+  }
+
   async approve(id: string, userId: string) {
     const college = await this.prisma.college.findUnique({
       where: { id },
@@ -155,6 +195,14 @@ export class CollegesService {
       },
     });
 
+    await this.activityLogService.createLog({
+      userId,
+      activity: ActivityType.COLLEGE,
+      entityType: 'COLLEGE',
+      entityId: id,
+      description: `College ${college.name} activated`,
+    });
+
     await this.notificationsService.createNotification({
       title: 'College Approved',
       message: `College ${college.name} has been approved.`,
@@ -165,7 +213,7 @@ export class CollegesService {
     return updated;
   }
 
-  async remove(id: string) {
+  async remove(id: string, userId?: string) {
     const college = await this.prisma.college.findUnique({
       where: { id },
     });
@@ -174,11 +222,46 @@ export class CollegesService {
       throw new NotFoundException('College not found');
     }
 
-    return this.prisma.college.update({
-      where: { id },
-      data: {
-        isActive: false,
-      },
+    if (userId) {
+      await this.activityLogService.createLog({
+        userId,
+        activity: ActivityType.COLLEGE,
+        entityType: 'COLLEGE',
+        entityId: id,
+        description: `College ${college.name} permanently deleted`,
+      });
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Unlink leads having this college as final college (set finalCollegeId = null)
+      await tx.lead.updateMany({
+        where: { finalCollegeId: id },
+        data: { finalCollegeId: null },
+      });
+
+      // 2. Delete college applications (and dependent interviews/payments/letters/history)
+      await tx.leadCollege.deleteMany({
+        where: { collegeId: id },
+      });
+
+      // 3. Delete college courses
+      await tx.course.deleteMany({
+        where: { collegeId: id },
+      });
+
+      // 4. Delete college competitor associations
+      await tx.collegeCompetitor.deleteMany({
+        where: {
+          OR: [{ collegeId: id }, { competitorCollegeId: id }],
+        },
+      });
+
+      // 5. Delete the college record itself
+      await tx.college.delete({
+        where: { id },
+      });
     });
+
+    return { message: 'College permanently deleted' };
   }
 }

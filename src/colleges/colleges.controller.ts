@@ -13,6 +13,7 @@ import {
 import { CollegesService } from './colleges.service';
 import { CreateCollegeDto } from './dto/create-college.dto';
 import { UpdateCollegeDto } from './dto/update-college.dto';
+import { UpdateCollegeStatusDto } from './dto/update-college-status.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from 'src/auth/guards/permissions/permissions.guard';
 import { RequirePermission } from 'src/permissions/permissions.decorator';
@@ -20,7 +21,7 @@ import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-req
 
 @Controller('colleges')
 export class CollegesController {
-  constructor(private readonly collegesService: CollegesService) { }
+  constructor(private readonly collegesService: CollegesService) {}
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('COLLEGE_MANAGE')
@@ -33,12 +34,29 @@ export class CollegesController {
   @Get()
   findAll(
     @Query('search') search?: string,
+    @Query('hasTieUp') hasTieUp?: string,
+    @Query('state') state?: string,
+    @Query('city') city?: string,
+  ) {
+    return this.collegesService.findAllActive({
+      search,
+      hasTieUp,
+      state,
+      city,
+    });
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_MANAGE')
+  @Get('management')
+  findAllManagement(
+    @Query('search') search?: string,
     @Query('isActive') isActive?: string,
     @Query('hasTieUp') hasTieUp?: string,
     @Query('state') state?: string,
     @Query('city') city?: string,
   ) {
-    return this.collegesService.findAll({
+    return this.collegesService.findAllManagement({
       search,
       isActive,
       hasTieUp,
@@ -62,6 +80,21 @@ export class CollegesController {
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('COLLEGE_MANAGE')
+  @Patch(':id/status')
+  updateStatus(
+    @Param('id') id: string,
+    @Body() updateStatusDto: UpdateCollegeStatusDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.collegesService.updateStatus(
+      id,
+      updateStatusDto.isActive,
+      req.user.sub,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('COLLEGE_MANAGE')
   @Patch(':id/approve')
   approve(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     return this.collegesService.approve(id, req.user.sub);
@@ -70,8 +103,7 @@ export class CollegesController {
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('COLLEGE_MANAGE')
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.collegesService.remove(id);
+  remove(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    return this.collegesService.remove(id, req.user.sub);
   }
 }
-

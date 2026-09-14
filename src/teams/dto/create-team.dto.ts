@@ -1,4 +1,10 @@
-import { IsArray, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator';
+import {
+  IsArray,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+} from 'class-validator';
 
 export class CreateTeamDto {
   @IsString()
@@ -18,4 +24,3 @@ export class CreateTeamDto {
   @IsUUID('all', { each: true })
   memberIds!: string[];
 }
-

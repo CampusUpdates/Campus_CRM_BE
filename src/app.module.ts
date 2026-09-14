@@ -28,6 +28,7 @@ import { ReportsModule } from './reports/reports.module';
 import { InteractionsModule } from './interactions/interactions.module';
 import { TodosModule } from './todos/todos.module';
 import { CallsModule } from './calls/calls.module';
+import { ScheduleModule } from '@nestjs/schedule';
 
 @Module({
   imports: [
@@ -60,9 +61,9 @@ import { CallsModule } from './calls/calls.module';
     PermissionsModule,
     ReportsModule,
     CallsModule,
+    ScheduleModule.forRoot(),
   ],
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule { }
-
+export class AppModule {}

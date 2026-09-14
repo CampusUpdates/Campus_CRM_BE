@@ -118,7 +118,7 @@ model Course {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  college   College  @relation(fields: [collegeId], references: [id])
+  college   College  @relation(fields: [collegeId], references: [id], onDelete: Cascade)
 }
 
 model CollegeCompetitor {
@@ -126,8 +126,8 @@ model CollegeCompetitor {
   collegeId           String   @db.Uuid
   competitorCollegeId String   @db.Uuid
   createdAt           DateTime @default(now())
-  college             College  @relation("PrimaryCollege", fields: [collegeId], references: [id])
-  competitorCollege   College  @relation("CompetitorCollege", fields: [competitorCollegeId], references: [id])
+  college             College  @relation("PrimaryCollege", fields: [collegeId], references: [id], onDelete: Cascade)
+  competitorCollege   College  @relation("CompetitorCollege", fields: [competitorCollegeId], references: [id], onDelete: Cascade)
 
   @@unique([collegeId, competitorCollegeId])
 }
@@ -203,7 +203,7 @@ model Lead {
   finalCollegeId           String?                @db.Uuid
   interactions             Interaction[]
   createdBy                User                   @relation("LeadCreator", fields: [createdById], references: [id])
-  finalCollege             College?               @relation("FinalCollege", fields: [finalCollegeId], references: [id])
+  finalCollege             College?               @relation("FinalCollege", fields: [finalCollegeId], references: [id], onDelete: SetNull)
   status                   LeadStatus             @relation(fields: [statusId], references: [id])
   assignments              LeadAssignment[]
   claimRequests            LeadClaimRequest[]
@@ -247,7 +247,7 @@ model LeadCollege {
   feePitched            Decimal?               @db.Decimal(10, 2)
   isCancelled           Boolean                @default(false)
   specializationPitched String?
-  college               College                @relation(fields: [collegeId], references: [id])
+  college               College                @relation(fields: [collegeId], references: [id], onDelete: Cascade)
   lead                  Lead                   @relation(fields: [leadId], references: [id])
   pitchedBy             User                   @relation("LeadCollegePitcher", fields: [pitchedById], references: [id])
   processedBy           User?                  @relation("LeadCollegeApprover", fields: [processedById], references: [id])
@@ -477,15 +477,32 @@ model ActivityLog {
 }
 
 model Office {
-  id         Int          @id @default(autoincrement())
-  name       String       @unique
-  address    String?
-  city       String?
-  state      String?
-  isActive   Boolean      @default(true)
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
-  attendance Attendance[]
+  id               Int                @id @default(autoincrement())
+  name             String             @unique
+  address          String?
+  city             String?
+  state            String?
+  latitude         Float?
+  longitude        Float?
+  radiusMeters     Int                @default(100)
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  attendance       Attendance[]
+  attendancePolicy AttendancePolicy?
+}
+
+model AttendancePolicy {
+  id                Int      @id @default(autoincrement())
+  officeId          Int      @unique
+  officeStartTime   String
+  officeEndTime     String
+  casualLeaveCutoff String
+  halfDayCutoff     String
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  office            Office   @relation(fields: [officeId], references: [id], onDelete: Cascade)
 }
 
 model Attendance {
@@ -503,6 +520,19 @@ model Attendance {
 
   @@unique([userId, date])
   @@index([officeId])
+}
+
+model Holiday {
+  id          Int      @id @default(autoincrement())
+  date        DateTime @db.Date
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([date])
+  @@index([date])
 }
 
 model Todo {
@@ -699,6 +729,7 @@ enum AttendanceStatus {
   ABSENT
   HALF_DAY
   LEAVE
+  CASUAL_LEAVE
 }
 
 enum InteractionType {
@@ -756,6 +787,7 @@ enum ActivityType {
   USER
   LEAD
   COLLEGE
+  TEAM
   DATA_UPLOAD
   DATA_ASSIGNMENT
   TPC

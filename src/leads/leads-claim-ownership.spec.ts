@@ -1,8 +1,18 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { LeadsService } from './leads.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { ClaimRequestStatus, OwnershipChangeReason } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
+import {
+  ClaimRequestStatus,
+  LeadSource,
+  OwnershipChangeReason,
+} from '@prisma/client';
 
 describe('LeadsService - Lead Reclaim & Ownership History', () => {
   let service: LeadsService;
@@ -45,7 +55,11 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
   };
 
   const mockStatusLead = { id: 1, name: 'LEAD', isActive: true };
-  const mockStatusAdmissionDone = { id: 2, name: 'ADMISSION_DONE', isActive: true };
+  const mockStatusAdmissionDone = {
+    id: 2,
+    name: 'ADMISSION_DONE',
+    isActive: true,
+  };
 
   const pastDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000); // 5 days ago (expired)
   const futureDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000); // 2 days in future (active)
@@ -97,9 +111,11 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
     prismaMock = {
       user: {
         findUnique: jest.fn().mockImplementation(({ where }) => {
-          if (where.id === superAdminUuid) return Promise.resolve(mockSuperAdminUser);
+          if (where.id === superAdminUuid)
+            return Promise.resolve(mockSuperAdminUser);
           if (where.id === advisorUuid) return Promise.resolve(mockAdvisorUser);
-          if (where.id === requesterUuid) return Promise.resolve(mockRequesterUser);
+          if (where.id === requesterUuid)
+            return Promise.resolve(mockRequesterUser);
           return Promise.resolve(null);
         }),
       },
@@ -118,25 +134,45 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
       lead: {
         findFirst: jest.fn().mockResolvedValue(null),
         findUnique: jest.fn().mockResolvedValue(expiredLead),
-        create: jest.fn().mockResolvedValue({ id: validLeadUuid, createdById: advisorUuid, statusId: 1, firstName: 'New', lastName: 'Student' }),
+        create: jest.fn().mockResolvedValue({
+          id: validLeadUuid,
+          createdById: advisorUuid,
+          statusId: 1,
+          firstName: 'New',
+          lastName: 'Student',
+        }),
         findMany: jest.fn().mockResolvedValue([]),
       },
       leadClaimRequest: {
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }) =>
-          Promise.resolve({ id: claimRequestUuid, ...data, requestedAt: new Date() }),
+          Promise.resolve({
+            id: claimRequestUuid,
+            ...data,
+            requestedAt: new Date(),
+          }),
         ),
         findMany: jest.fn().mockResolvedValue([]),
-        update: jest.fn().mockImplementation(({ where, data }) =>
-          Promise.resolve({ id: where.id, ...data }),
-        ),
+        update: jest
+          .fn()
+          .mockImplementation(({ where, data }) =>
+            Promise.resolve({ id: where.id, ...data }),
+          ),
       },
       leadAssignment: {
-        create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 999, ...data })),
+        create: jest
+          .fn()
+          .mockImplementation(({ data }) =>
+            Promise.resolve({ id: 999, ...data }),
+          ),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       leadOwnershipHistory: {
-        create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'hist-1', ...data })),
+        create: jest
+          .fn()
+          .mockImplementation(({ data }) =>
+            Promise.resolve({ id: 'hist-1', ...data }),
+          ),
       },
       activityLog: {
         create: jest.fn().mockResolvedValue({ id: 'act-1' }),
@@ -165,6 +201,10 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
       providers: [
         LeadsService,
         { provide: PrismaService, useValue: prismaMock },
+        {
+          provide: NotificationsService,
+          useValue: { createNotification: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -174,7 +214,10 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
   describe('Claim Request Creation', () => {
     it('1. Claim request after 4-day expiry succeeds', async () => {
       prismaMock.lead.findUnique.mockResolvedValue(expiredLead);
-      const res = await service.createClaimRequest(validLeadUuid, requesterUuid);
+      const res = await service.createClaimRequest(
+        validLeadUuid,
+        requesterUuid,
+      );
 
       expect(res).toBeDefined();
       expect(res.status).toBe('PENDING');
@@ -195,16 +238,16 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
 
     it('2. Claim request before expiry fails', async () => {
       prismaMock.lead.findUnique.mockResolvedValue(activeLead);
-      await expect(service.createClaimRequest(validLeadUuid, requesterUuid)).rejects.toThrow(
-        ConflictException,
-      );
+      await expect(
+        service.createClaimRequest(validLeadUuid, requesterUuid),
+      ).rejects.toThrow(ConflictException);
     });
 
     it('3. admission_done lead cannot be reclaimed', async () => {
       prismaMock.lead.findUnique.mockResolvedValue(admissionDoneLead);
-      await expect(service.createClaimRequest(validLeadUuid, requesterUuid)).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(
+        service.createClaimRequest(validLeadUuid, requesterUuid),
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it('4. Duplicate PENDING claim request fails', async () => {
@@ -214,9 +257,9 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
         status: 'PENDING',
       });
 
-      await expect(service.createClaimRequest(validLeadUuid, requesterUuid)).rejects.toThrow(
-        ConflictException,
-      );
+      await expect(
+        service.createClaimRequest(validLeadUuid, requesterUuid),
+      ).rejects.toThrow(ConflictException);
     });
   });
 
@@ -229,7 +272,9 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
 
     it('6. Non-Super Admin cannot approve/reject', async () => {
       await expect(
-        service.processClaimRequest(claimRequestUuid, advisorUuid, { status: ClaimRequestStatus.APPROVED }),
+        service.processClaimRequest(claimRequestUuid, advisorUuid, {
+          status: ClaimRequestStatus.APPROVED,
+        }),
       ).rejects.toThrow(ForbiddenException);
     });
   });
@@ -238,10 +283,14 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
     it('7. Super Admin can approve', async () => {
       prismaMock.lead.findUnique.mockResolvedValue(expiredLead);
 
-      const res = await service.processClaimRequest(claimRequestUuid, superAdminUuid, {
-        status: ClaimRequestStatus.APPROVED,
-        remarks: 'Approved by super admin',
-      });
+      const res = await service.processClaimRequest(
+        claimRequestUuid,
+        superAdminUuid,
+        {
+          status: ClaimRequestStatus.APPROVED,
+          remarks: 'Approved by super admin',
+        },
+      );
 
       expect(res.message).toBe('Claim request approved successfully');
       expect(res.claimRequest.status).toBe('APPROVED');
@@ -250,9 +299,13 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
     it('8. Approval creates the correct new ownership (LeadAssignment)', async () => {
       prismaMock.lead.findUnique.mockResolvedValue(expiredLead);
 
-      const res = await service.processClaimRequest(claimRequestUuid, superAdminUuid, {
-        status: ClaimRequestStatus.APPROVED,
-      });
+      const res = await service.processClaimRequest(
+        claimRequestUuid,
+        superAdminUuid,
+        {
+          status: ClaimRequestStatus.APPROVED,
+        },
+      );
 
       expect(res.assignment).toBeDefined();
       expect(prismaMock.leadAssignment.create).toHaveBeenCalledWith({
@@ -331,10 +384,14 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
     });
 
     it('14. Rejection does not change ownership', async () => {
-      const res = await service.processClaimRequest(claimRequestUuid, superAdminUuid, {
-        status: ClaimRequestStatus.REJECTED,
-        remarks: 'Not eligible',
-      });
+      const res = await service.processClaimRequest(
+        claimRequestUuid,
+        superAdminUuid,
+        {
+          status: ClaimRequestStatus.REJECTED,
+          remarks: 'Not eligible',
+        },
+      );
 
       expect(res.message).toBe('Claim request rejected successfully');
       expect(prismaMock.leadAssignment.create).not.toHaveBeenCalled();
@@ -398,7 +455,9 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
       });
 
       await expect(
-        service.processClaimRequest(claimRequestUuid, superAdminUuid, { status: ClaimRequestStatus.APPROVED }),
+        service.processClaimRequest(claimRequestUuid, superAdminUuid, {
+          status: ClaimRequestStatus.APPROVED,
+        }),
       ).rejects.toThrow(ConflictException);
     });
 
@@ -431,10 +490,14 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
         return Promise.resolve([{ id: validLeadUuid }]);
       });
 
-      await service.processClaimRequest(claimRequestUuid, superAdminUuid, { status: ClaimRequestStatus.APPROVED });
+      await service.processClaimRequest(claimRequestUuid, superAdminUuid, {
+        status: ClaimRequestStatus.APPROVED,
+      });
 
       await expect(
-        service.processClaimRequest(claimRequestUuid, superAdminUuid, { status: ClaimRequestStatus.APPROVED }),
+        service.processClaimRequest(claimRequestUuid, superAdminUuid, {
+          status: ClaimRequestStatus.APPROVED,
+        }),
       ).rejects.toThrow(ConflictException);
     });
   });
@@ -445,9 +508,11 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
         {
           firstName: 'New',
           lastName: 'Student',
+          email: 'new.student@example.com',
           phone: '9999999999',
           city: 'Delhi',
           state: 'Delhi',
+          source: LeadSource.OTHER,
           collegeIds: [],
         },
         advisorUuid,
@@ -466,7 +531,9 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
     it('21. Existing admin reassignment records ADMIN_REASSIGNMENT history', async () => {
       prismaMock.lead.findUnique.mockResolvedValue(expiredLead);
 
-      await service.assignLead(validLeadUuid, requesterUuid, { sub: superAdminUuid });
+      await service.assignLead(validLeadUuid, requesterUuid, {
+        sub: superAdminUuid,
+      });
 
       expect(prismaMock.leadOwnershipHistory.create).toHaveBeenCalledWith({
         data: expect.objectContaining({

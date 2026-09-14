@@ -1,6 +1,17 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { TeamsService } from './teams.service';
 import { CreateTeamDto } from './dto/create-team.dto';
+import { UpdateTeamDto } from './dto/update-team.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from 'src/auth/guards/permissions/permissions.guard';
 import { RequirePermission } from 'src/permissions/permissions.decorator';
@@ -20,13 +31,21 @@ export class TeamsController {
     return this.teamsService.create(createTeamDto, req.user);
   }
 
+  @Patch(':id')
+  @RequirePermission('TEAM_MANAGE')
+  update(
+    @Param('id') id: string,
+    @Body() updateTeamDto: UpdateTeamDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.teamsService.update(id, updateTeamDto, req.user);
+  }
 
   @Get()
   @RequirePermission('TEAM_MANAGE')
   findAll(@Req() req: AuthenticatedRequest) {
     return this.teamsService.findAll(req.user);
   }
-
 
   @Get('eligible-managers')
   @RequirePermission('TEAM_MANAGE')
@@ -51,6 +70,10 @@ export class TeamsController {
   getTeamMembers(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     return this.teamsService.getTeamMembersForManager(id, req.user);
   }
+
+  @Delete(':id')
+  @RequirePermission('TEAM_MANAGE')
+  remove(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    return this.teamsService.remove(id, req.user);
+  }
 }
-
-

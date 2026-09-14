@@ -14,7 +14,10 @@ export class ActivityLogController {
     @Req() req: AuthenticatedRequest,
     @Query() query: QueryActivityLogDto,
   ) {
-    return this.activityLogService.findAll(query, req.user.sub, req.user.roleId);
+    return this.activityLogService.findAll(
+      query,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 }
-

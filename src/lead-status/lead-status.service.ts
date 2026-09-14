@@ -9,6 +9,9 @@ export class LeadStatusService {
   //find leadstatus
   async findAll() {
     const leadStatuses = await this.prisma.leadStatus.findMany({
+      where: {
+        isActive: true,
+      },
       orderBy: {
         displayOrder: 'asc',
       },

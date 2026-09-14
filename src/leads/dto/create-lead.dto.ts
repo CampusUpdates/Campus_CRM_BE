@@ -50,7 +50,6 @@ export class CreateLeadDto {
   @IsOptional()
   dateOfBirth?: Date;
 
-
   @IsOptional()
   @IsNumber()
   @Min(0)
@@ -101,4 +100,3 @@ export class CreateLeadDto {
   @IsInt()
   statusId?: number;
 }
-

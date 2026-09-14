@@ -2,7 +2,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { LeadsService } from './leads.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { CollegeStatus } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
+import { CollegeStatus, LeadSource } from '@prisma/client';
 
 describe('LeadsService - College Pitch Approval Rules', () => {
   let service: LeadsService;
@@ -18,7 +19,11 @@ describe('LeadsService - College Pitch Approval Rules', () => {
     id: validLeadUuid,
     statusId: 1,
     createdById: validUserUuid,
-    assignments: [{ userId: validUserUuid, status: 'ACTIVE' }],
+    firstName: 'John',
+    lastName: 'Doe',
+    phone: '9876543210',
+    email: 'john@example.com',
+    source: LeadSource.OTHER,
   };
   const mockStatus = { id: 1, name: 'LEAD', isActive: true };
 
@@ -40,8 +45,16 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       },
       leadCollege: {
         createMany: jest.fn().mockResolvedValue({ count: 1 }),
-        create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'pitch-1', ...data })),
-        update: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'pitch-1', ...data })),
+        create: jest
+          .fn()
+          .mockImplementation(({ data }) =>
+            Promise.resolve({ id: 'pitch-1', ...data }),
+          ),
+        update: jest
+          .fn()
+          .mockImplementation(({ data }) =>
+            Promise.resolve({ id: 'pitch-1', ...data }),
+          ),
         findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(null),
       },
@@ -70,6 +83,10 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       providers: [
         LeadsService,
         { provide: PrismaService, useValue: prismaMock },
+        {
+          provide: NotificationsService,
+          useValue: { createNotification: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -83,6 +100,7 @@ describe('LeadsService - College Pitch Approval Rules', () => {
     phone: '9876543210',
     city: 'Mumbai',
     state: 'Maharashtra',
+    source: LeadSource.OTHER,
     collegeIds: [validCollegeUuid1],
   };
 
@@ -124,7 +142,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       ]);
 
       await expect(service.create(createDto, mockUser.sub)).rejects.toThrow(
-        new BadRequestException('This college is not currently available for pitching.'),
+        new BadRequestException(
+          'This college is not currently available for pitching.',
+        ),
       );
     });
 
@@ -140,7 +160,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       ]);
 
       await expect(service.create(createDto, mockUser.sub)).rejects.toThrow(
-        new BadRequestException('This college is not currently available for pitching.'),
+        new BadRequestException(
+          'This college is not currently available for pitching.',
+        ),
       );
     });
 
@@ -156,7 +178,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       ]);
 
       await expect(service.create(createDto, mockUser.sub)).rejects.toThrow(
-        new BadRequestException('This college is not currently available for pitching.'),
+        new BadRequestException(
+          'This college is not currently available for pitching.',
+        ),
       );
     });
 
@@ -247,8 +271,18 @@ describe('LeadsService - College Pitch Approval Rules', () => {
 
   describe('Business Rule: LeadCollege Pipeline Approval Enforcement & Forward-Only Status Rule', () => {
     const statusLead = { id: 1, name: 'LEAD', displayOrder: 1, isActive: true };
-    const statusApp = { id: 2, name: 'APPLICATION', displayOrder: 2, isActive: true };
-    const statusIntSched = { id: 3, name: 'INTERVIEW_SCHEDULED', displayOrder: 3, isActive: true };
+    const statusApp = {
+      id: 2,
+      name: 'APPLICATION',
+      displayOrder: 2,
+      isActive: true,
+    };
+    const statusIntSched = {
+      id: 3,
+      name: 'INTERVIEW_SCHEDULED',
+      displayOrder: 3,
+      isActive: true,
+    };
 
     const mockPaUserRecord = {
       id: validUserUuid,
@@ -288,7 +322,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           mockUser,
         ),
       ).rejects.toThrow(
-        new BadRequestException('College pipeline cannot be changed until Manager approval is completed.'),
+        new BadRequestException(
+          'College pipeline cannot be changed until Manager approval is completed.',
+        ),
       );
     });
 
@@ -311,7 +347,10 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       prismaMock.leadCollege.findFirst.mockResolvedValue(approvedLeadCollege);
       prismaMock.leadCollegeInterview.findFirst.mockResolvedValue(null);
       prismaMock.leadCollegeInterview.create.mockResolvedValue({ id: 'int-1' });
-      prismaMock.leadCollege.update.mockResolvedValue({ ...approvedLeadCollege, statusId: 3 });
+      prismaMock.leadCollege.update.mockResolvedValue({
+        ...approvedLeadCollege,
+        statusId: 3,
+      });
 
       const result = await service.updatePipeline(
         validLeadUuid,
@@ -352,7 +391,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           mockUser,
         ),
       ).rejects.toThrow(
-        new BadRequestException('Program Advisors cannot move pipeline status backwards.'),
+        new BadRequestException(
+          'Program Advisors cannot move pipeline status backwards.',
+        ),
       );
     });
 
@@ -383,7 +424,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           mockUser,
         ),
       ).rejects.toThrow(
-        new BadRequestException('This college pitch was rejected by the manager. Pipeline changes are not allowed.'),
+        new BadRequestException(
+          'This college pitch was rejected by the manager. Pipeline changes are not allowed.',
+        ),
       );
     });
 
@@ -425,14 +468,19 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           mockUser,
         ),
       ).rejects.toThrow(
-        new BadRequestException('College pipeline cannot be changed until Manager approval is completed.'),
+        new BadRequestException(
+          'College pipeline cannot be changed until Manager approval is completed.',
+        ),
       );
 
       // Attempt update on APPROVED College A -> should succeed
       prismaMock.leadCollege.findFirst.mockResolvedValue(collegeApproved);
       prismaMock.leadCollegeInterview.findFirst.mockResolvedValue(null);
       prismaMock.leadCollegeInterview.create.mockResolvedValue({ id: 'int-2' });
-      prismaMock.leadCollege.update.mockResolvedValue({ ...collegeApproved, statusId: 3 });
+      prismaMock.leadCollege.update.mockResolvedValue({
+        ...collegeApproved,
+        statusId: 3,
+      });
 
       const result = await service.updatePipeline(
         validLeadUuid,

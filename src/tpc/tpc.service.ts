@@ -9,7 +9,7 @@ export class TpcService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
-  ) { }
+  ) {}
 
   async assignTpc(dto: AssignTpcDto, assignedById: string) {
     const lead = await this.prisma.lead.findUnique({
@@ -233,21 +233,21 @@ export class TpcService {
       where: isGlobalAccess
         ? {}
         : {
-          OR: [
-            {
-              assignments: {
-                some: {
-                  OR: [{ assignedToId: userId }, { assignedById: userId }],
+            OR: [
+              {
+                assignments: {
+                  some: {
+                    OR: [{ assignedToId: userId }, { assignedById: userId }],
+                  },
                 },
               },
-            },
-            {
-              lead: {
-                createdById: userId,
+              {
+                lead: {
+                  createdById: userId,
+                },
               },
-            },
-          ],
-        },
+            ],
+          },
       include: {
         lead: {
           include: {

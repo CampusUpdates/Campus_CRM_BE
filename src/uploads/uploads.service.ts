@@ -1,8 +1,19 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DataAssignmentStatus } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { CreateDataAssignmentDto, SelectionMode } from './dto/create-data-assignment.dto';
-import { AssignmentStatusFilter, FilterStudentDataDto } from './dto/filter-student-data.dto';
+import {
+  CreateDataAssignmentDto,
+  SelectionMode,
+} from './dto/create-data-assignment.dto';
+import {
+  AssignmentStatusFilter,
+  FilterStudentDataDto,
+} from './dto/filter-student-data.dto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as XLSX from 'xlsx';
@@ -128,11 +139,7 @@ function extractStudentFromRow(row: Record<string, any>): {
     norm['address'] ||
     '';
 
-  const state =
-    norm['state'] ||
-    norm['province'] ||
-    norm['region'] ||
-    '';
+  const state = norm['state'] || norm['province'] || norm['region'] || '';
 
   if (!firstName || !phone) {
     return null;
@@ -169,7 +176,9 @@ export class UploadsService {
 
     const maxSizeBytes = 20 * 1024 * 1024; // 20 MB
     if (file.size > maxSizeBytes) {
-      throw new BadRequestException('File size exceeds maximum allowed limit of 20 MB.');
+      throw new BadRequestException(
+        'File size exceeds maximum allowed limit of 20 MB.',
+      );
     }
 
     const uploadDir = path.join(process.cwd(), 'uploads');
@@ -204,7 +213,10 @@ export class UploadsService {
       }
 
       const sheet = workbook.Sheets[sheetName];
-      const rawRows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+      const rawRows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet, {
+        defval: '',
+        raw: false,
+      });
 
       const validRecords: any[] = [];
       const seenPhones = new Set<string>();
@@ -466,14 +478,15 @@ export class UploadsService {
     ]);
 
     // Batch 2: Status counts and distribution calculations
-    const [availableCount, assignedCount, availableMatchingStudents] = await Promise.all([
-      this.prisma.studentData.count({ where: availableCountWhere }),
-      this.prisma.studentData.count({ where: assignedCountWhere }),
-      this.prisma.studentData.findMany({
-        where: availableCountWhere,
-        select: { state: true },
-      }),
-    ]);
+    const [availableCount, assignedCount, availableMatchingStudents] =
+      await Promise.all([
+        this.prisma.studentData.count({ where: availableCountWhere }),
+        this.prisma.studentData.count({ where: assignedCountWhere }),
+        this.prisma.studentData.findMany({
+          where: availableCountWhere,
+          select: { state: true },
+        }),
+      ]);
 
     // Batch 3: Distinct filter options
     const [distinctStates, distinctCities, uploadsList] = await Promise.all([
@@ -582,7 +595,9 @@ export class UploadsService {
         status: 'ACTIVE',
         role: { name: 'Program Advisor' },
         OR: [
-          ...(managedTeamIds.length > 0 ? [{ teamId: { in: managedTeamIds } }] : []),
+          ...(managedTeamIds.length > 0
+            ? [{ teamId: { in: managedTeamIds } }]
+            : []),
           { managerId: assignerId },
         ],
       },
@@ -607,11 +622,19 @@ export class UploadsService {
     return new Date('2099-12-31T23:59:59.999Z');
   }
 
-  async assignData(dto: CreateDataAssignmentDto, assignerId: string, roleId: number) {
-    const { assignedToId, selectionMode, studentDataIds, quantity, filters } = dto;
+  async assignData(
+    dto: CreateDataAssignmentDto,
+    assignerId: string,
+    roleId: number,
+  ) {
+    const { assignedToId, selectionMode, studentDataIds, quantity, filters } =
+      dto;
     const now = new Date();
 
-    const eligibleAssignees = await this.findEligibleAssignees(assignerId, roleId);
+    const eligibleAssignees = await this.findEligibleAssignees(
+      assignerId,
+      roleId,
+    );
     const targetUser = eligibleAssignees.find((u) => u.id === assignedToId);
 
     if (!targetUser) {
@@ -623,7 +646,11 @@ export class UploadsService {
     let candidateIds: string[] = [];
     const availableWhere = this.getAvailableStudentDataCondition();
 
-    if (selectionMode === SelectionMode.ALL_MATCHING || (!studentDataIds || studentDataIds.length === 0)) {
+    if (
+      selectionMode === SelectionMode.ALL_MATCHING ||
+      !studentDataIds ||
+      studentDataIds.length === 0
+    ) {
       const filterDto = filters || new FilterStudentDataDto();
       const baseConditions: any[] = [];
 
@@ -650,7 +677,8 @@ export class UploadsService {
         });
       }
 
-      const baseWhere = baseConditions.length > 0 ? { AND: baseConditions } : {};
+      const baseWhere =
+        baseConditions.length > 0 ? { AND: baseConditions } : {};
       const finalWhere = { AND: [baseWhere, availableWhere] };
 
       const takeLimit = quantity && quantity > 0 ? quantity : undefined;
@@ -668,7 +696,9 @@ export class UploadsService {
     }
 
     if (candidateIds.length === 0) {
-      throw new BadRequestException('No eligible student data records found matching your selection criteria.');
+      throw new BadRequestException(
+        'No eligible student data records found matching your selection criteria.',
+      );
     }
 
     const requestedCount = candidateIds.length;
@@ -711,7 +741,8 @@ export class UploadsService {
           skipDuplicates: true,
         });
 
-        const targetName = `${targetUser.firstName} ${targetUser.lastName || ''}`.trim();
+        const targetName =
+          `${targetUser.firstName} ${targetUser.lastName || ''}`.trim();
         const teamName = targetUser.team?.name || 'Admissions Team';
 
         await tx.activityLog.create({
@@ -740,9 +771,10 @@ export class UploadsService {
           },
         });
 
-        const message = skippedCount > 0
-          ? `${eligibleIds.length} of ${requestedCount} records assigned to ${targetName} (${teamName}). ${skippedCount} records were skipped.`
-          : `Successfully assigned ${eligibleIds.length} records to ${targetName} (${teamName}).`;
+        const message =
+          skippedCount > 0
+            ? `${eligibleIds.length} of ${requestedCount} records assigned to ${targetName} (${teamName}). ${skippedCount} records were skipped.`
+            : `Successfully assigned ${eligibleIds.length} records to ${targetName} (${teamName}).`;
 
         return {
           message,
@@ -814,7 +846,10 @@ export class UploadsService {
     managerId: string,
     roleId: number,
   ) {
-    const eligibleAdvisors = await this.findEligibleAssignees(managerId, roleId);
+    const eligibleAdvisors = await this.findEligibleAssignees(
+      managerId,
+      roleId,
+    );
     const isEligible = eligibleAdvisors.some((a) => a.id === advisorId);
 
     if (!isEligible) {
@@ -897,7 +932,10 @@ export class UploadsService {
   }
 
   async reclaimAllAdvisorData(managerId: string, roleId: number) {
-    const eligibleAdvisors = await this.findEligibleAssignees(managerId, roleId);
+    const eligibleAdvisors = await this.findEligibleAssignees(
+      managerId,
+      roleId,
+    );
     const eligibleAdvisorIds = eligibleAdvisors.map((a) => a.id);
 
     if (eligibleAdvisorIds.length === 0) {
@@ -991,5 +1029,3 @@ export class UploadsService {
     });
   }
 }
-
-

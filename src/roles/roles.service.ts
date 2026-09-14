@@ -7,9 +7,23 @@ import { ConflictException } from '@nestjs/common';
 export class RolesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  //find all roles
-  async findAll() {
+  //find all roles (optionally filtered by user permissions)
+  async findAll(userRoleId?: number) {
+    const superAdminRole = await this.prisma.role.findUnique({
+      where: { name: 'SUPER_ADMIN' },
+    });
+
+    const isSuperAdminCaller =
+      userRoleId && superAdminRole && userRoleId === superAdminRole.id;
+
     const result = await this.prisma.role.findMany({
+      where: isSuperAdminCaller
+        ? {}
+        : {
+            name: {
+              not: 'SUPER_ADMIN',
+            },
+          },
       orderBy: {
         displayOrder: 'asc',
       },

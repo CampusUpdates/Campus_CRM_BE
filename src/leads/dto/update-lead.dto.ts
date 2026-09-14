@@ -84,4 +84,3 @@ export class UpdateLeadDto {
   @IsString({ each: true })
   collegeIds?: string[];
 }
-

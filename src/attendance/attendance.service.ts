@@ -1,5 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { AttendancePolicyDto } from './dto/attendance-policy.dto';
+import { HolidayDto } from './dto/holiday.dto';
 
 export interface AttendanceFilterDto {
   date?: string;
@@ -9,7 +16,7 @@ export interface AttendanceFilterDto {
 
 @Injectable()
 export class AttendanceService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
   async getAttendanceRecords(filters: AttendanceFilterDto) {
     const { date: dateParam, status, teamId } = filters;
@@ -84,63 +91,112 @@ export class AttendanceService {
       orderBy: { createdAt: 'desc' },
     });
 
-    const activeUsersWhere: any = { status: 'ACTIVE' };
-    if (teamId && teamId !== 'all') {
-      const parsedTeamId = parseInt(teamId, 10);
-      if (!isNaN(parsedTeamId)) {
-        activeUsersWhere.teamId = parsedTeamId;
-      }
-    }
+    return records;
+  }
 
-    const activeUsers = await this.prisma.user.findMany({
-      where: activeUsersWhere,
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        email: true,
-        phone: true,
-        role: { select: { id: true, name: true } },
-        team: {
-          select: {
-            id: true,
-            name: true,
-            manager: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
-          },
+  // --- Policy Validation ---
+  private validatePolicyTimes(dto: AttendancePolicyDto) {
+    const parseTime = (t: string) => {
+      const [h, m] = t.split(':').map(Number);
+      return h * 60 + m;
+    };
+
+    const start = parseTime(dto.officeStartTime);
+    const casual = parseTime(dto.casualLeaveCutoff);
+    const half = parseTime(dto.halfDayCutoff);
+    const end = parseTime(dto.officeEndTime);
+
+    if (!(start < casual && casual < half && half <= end)) {
+      throw new BadRequestException(
+        'Invalid policy times. Required ordering: officeStartTime < casualLeaveCutoff < halfDayCutoff <= officeEndTime',
+      );
+    }
+  }
+
+  // --- Policy Endpoints ---
+  async getPolicy(officeId: number) {
+    const policy = await this.prisma.attendancePolicy.findUnique({
+      where: { officeId },
+    });
+    if (!policy)
+      throw new NotFoundException('Policy not found for this office');
+    return policy;
+  }
+
+  async updatePolicy(officeId: number, dto: AttendancePolicyDto) {
+    this.validatePolicyTimes(dto);
+
+    const policy = await this.prisma.attendancePolicy.findUnique({
+      where: { officeId },
+    });
+    if (!policy) {
+      return this.prisma.attendancePolicy.create({
+        data: {
+          officeId,
+          ...dto,
         },
+      });
+    }
+    return this.prisma.attendancePolicy.update({
+      where: { officeId },
+      data: dto,
+    });
+  }
+
+  // --- Holiday Endpoints ---
+  async getHolidays() {
+    return this.prisma.holiday.findMany({
+      orderBy: { date: 'asc' },
+    });
+  }
+
+  async createHoliday(dto: HolidayDto) {
+    const parsedDate = new Date(dto.date);
+    parsedDate.setHours(0, 0, 0, 0);
+
+    const existing = await this.prisma.holiday.findUnique({
+      where: { date: parsedDate },
+    });
+    if (existing)
+      throw new ConflictException('Holiday for this date already exists');
+
+    return this.prisma.holiday.create({
+      data: {
+        date: parsedDate,
+        name: dto.name,
+        description: dto.description,
+        isActive: dto.isActive !== undefined ? dto.isActive : true,
       },
     });
+  }
 
-    const recordedUserIds = new Set(records.map((r) => r.userId));
+  async updateHoliday(id: number, dto: HolidayDto) {
+    const parsedDate = new Date(dto.date);
+    parsedDate.setHours(0, 0, 0, 0);
 
-    const derivedRecords = activeUsers
-      .filter((u) => !recordedUserIds.has(u.id))
-      .map((user) => ({
-        id: `att-derived-${user.id}`,
-        userId: user.id,
-        officeId: 1,
-        date: startDate,
-        checkIn: new Date(startDate.getTime() + 9.5 * 3600 * 1000), // 09:30 AM
-        checkOut: new Date(startDate.getTime() + 18.5 * 3600 * 1000), // 06:30 PM
-        status: 'PRESENT' as const,
-        createdAt: startDate,
-        updatedAt: startDate,
-        user,
-        office: { id: 1, name: 'Main Campus Headquarters' },
-      }));
-
-    let combined = [...records, ...derivedRecords];
-
-    if (status && status !== 'ALL') {
-      combined = combined.filter((r) => r.status === status);
+    const existingDate = await this.prisma.holiday.findUnique({
+      where: { date: parsedDate },
+    });
+    if (existingDate && existingDate.id !== id) {
+      throw new ConflictException(
+        'Another holiday already exists for this date',
+      );
     }
 
-    return combined;
+    return this.prisma.holiday.update({
+      where: { id },
+      data: {
+        date: parsedDate,
+        name: dto.name,
+        description: dto.description,
+        isActive: dto.isActive,
+      },
+    });
+  }
+
+  async deleteHoliday(id: number) {
+    return this.prisma.holiday.delete({
+      where: { id },
+    });
   }
 }

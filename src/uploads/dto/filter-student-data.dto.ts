@@ -1,5 +1,12 @@
 import { Transform, Type } from 'class-transformer';
-import { IsArray, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import {
+  IsArray,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  Min,
+} from 'class-validator';
 
 export enum AssignmentStatusFilter {
   AVAILABLE = 'AVAILABLE',
@@ -11,8 +18,13 @@ export class FilterStudentDataDto {
   @IsOptional()
   @Transform(({ value }) => {
     if (!value) return undefined;
-    if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
-    if (typeof value === 'string') return value.split(',').map((v) => v.trim()).filter(Boolean);
+    if (Array.isArray(value))
+      return value.map((v) => String(v).trim()).filter(Boolean);
+    if (typeof value === 'string')
+      return value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
     return [String(value)];
   })
   @IsArray()
@@ -22,8 +34,13 @@ export class FilterStudentDataDto {
   @IsOptional()
   @Transform(({ value }) => {
     if (!value) return undefined;
-    if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
-    if (typeof value === 'string') return value.split(',').map((v) => v.trim()).filter(Boolean);
+    if (Array.isArray(value))
+      return value.map((v) => String(v).trim()).filter(Boolean);
+    if (typeof value === 'string')
+      return value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
     return [String(value)];
   })
   @IsArray()
@@ -33,8 +50,13 @@ export class FilterStudentDataDto {
   @IsOptional()
   @Transform(({ value }) => {
     if (!value) return undefined;
-    if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
-    if (typeof value === 'string') return value.split(',').map((v) => v.trim()).filter(Boolean);
+    if (Array.isArray(value))
+      return value.map((v) => String(v).trim()).filter(Boolean);
+    if (typeof value === 'string')
+      return value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
     return [String(value)];
   })
   @IsArray()
