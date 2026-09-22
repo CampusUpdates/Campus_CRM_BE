@@ -10,6 +10,7 @@ import {
 import { CallsService } from './calls.service';
 import { InitiateMockCallDto } from './dto/initiate-mock-call.dto';
 import { EndMockCallDto } from './dto/end-mock-call.dto';
+import { CreateCallOutcomeDto } from './dto/create-call-outcome.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from 'src/auth/guards/permissions/permissions.guard';
 import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
@@ -29,7 +30,11 @@ export class CallsController {
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
   ) {
-    return this.callsService.getAssignedStudentDataOne(id, req.user.sub);
+    return this.callsService.getAssignedStudentDataOne(
+      id,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Post('initiate')
@@ -37,7 +42,11 @@ export class CallsController {
     @Body() dto: InitiateMockCallDto,
     @Req() req: AuthenticatedRequest,
   ) {
-    return this.callsService.initiateMockCall(dto.studentDataId, req.user.sub);
+    return this.callsService.initiateMockCall(
+      dto.studentDataId,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Post('end')
@@ -51,5 +60,29 @@ export class CallsController {
   @Get('status/:callId')
   async getMockCallStatus(@Param('callId') callId: string) {
     return this.callsService.getMockCallStatus(callId);
+  }
+
+  @Post('outcome')
+  async createCallOutcome(
+    @Body() dto: CreateCallOutcomeDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.callsService.createCallOutcome(
+      dto,
+      req.user.sub,
+      req.user.roleId,
+    );
+  }
+
+  @Get('history/:studentDataId')
+  async getCallHistory(
+    @Param('studentDataId') studentDataId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.callsService.getCallHistory(
+      studentDataId,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 }

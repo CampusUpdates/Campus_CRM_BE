@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
 
 export interface AdmissionsDashboardFilters {
   startDate?: string;
@@ -21,7 +22,10 @@ export interface AdmissionsDashboardFilters {
 
 @Injectable()
 export class DashboardService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly teamLeadAuthService: TeamLeadAuthorizationService,
+  ) { }
 
   private metadataCache: {
     timestamp: number;
@@ -95,10 +99,11 @@ export class DashboardService {
       throw new UnauthorizedException('User profile not found');
     }
 
-    const roleName = user.role.name.toUpperCase();
-    const isAllowed = allowedRoles.some(
-      (allowed) => roleName === allowed || roleName.includes(allowed),
-    );
+    const roleNameClean = (user.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isAllowed = allowedRoles.some((allowed) => {
+      const allowedClean = allowed.toUpperCase().replace(/\s+/g, '_');
+      return roleNameClean === allowedClean || roleNameClean.includes(allowedClean);
+    });
 
     if (!isAllowed) {
       throw new ForbiddenException(
@@ -477,26 +482,57 @@ export class DashboardService {
     const callingUser = await this.verifyUserRole(userId, [
       'MANAGER',
       'SUPER_ADMIN',
+      'TEAM_LEAD',
     ]);
     const isSuperAdminUser = callingUser?.role?.name
       ?.toUpperCase()
       .includes('SUPER_ADMIN');
+    const isTeamLeadUser = await this.teamLeadAuthService.isTeamLead(userId);
 
-    // 1. Get teams managed by current user (or all teams if Super Admin)
-    const managedTeams = await this.prisma.team.findMany({
-      where: isSuperAdminUser
-        ? { isActive: true }
-        : { managerId: userId, isActive: true },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        managerId: true,
-      },
-      orderBy: {
-        name: 'asc',
-      },
-    });
+    // 1. Get teams managed by current user (or all teams if Super Admin, or assigned teams if Team Lead)
+    let managedTeams: Array<{ id: number; name: string; description: string | null; managerId: string }> = [];
+    if (isSuperAdminUser) {
+      managedTeams = await this.prisma.team.findMany({
+        where: { isActive: true },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          managerId: true,
+        },
+        orderBy: {
+          name: 'asc',
+        },
+      });
+    } else if (isTeamLeadUser) {
+      const assignedTeamIds =
+        await this.teamLeadAuthService.getTeamLeadAssignedTeamIds(userId);
+      managedTeams = await this.prisma.team.findMany({
+        where: { id: { in: assignedTeamIds }, isActive: true },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          managerId: true,
+        },
+        orderBy: {
+          name: 'asc',
+        },
+      });
+    } else {
+      managedTeams = await this.prisma.team.findMany({
+        where: { managerId: userId, isActive: true },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          managerId: true,
+        },
+        orderBy: {
+          name: 'asc',
+        },
+      });
+    }
 
     // Determine target team IDs
     let targetTeamIds: number[] = [];
@@ -526,29 +562,29 @@ export class DashboardService {
     const teamMembers =
       targetTeamIds.length > 0
         ? await this.prisma.user.findMany({
-            where: {
-              OR: [
-                { teamId: { in: targetTeamIds } },
-                { id: { in: targetManagerIds } },
-              ],
-              status: 'ACTIVE',
-            },
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              teamId: true,
-              team: {
-                select: {
-                  name: true,
-                },
+          where: {
+            OR: [
+              { teamId: { in: targetTeamIds } },
+              { id: { in: targetManagerIds } },
+            ],
+            status: 'ACTIVE',
+          },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            teamId: true,
+            team: {
+              select: {
+                name: true,
               },
             },
-            orderBy: {
-              firstName: 'asc',
-            },
-          })
+          },
+          orderBy: {
+            firstName: 'asc',
+          },
+        })
         : [];
 
     const memberIds = teamMembers.map((m) => m.id);
@@ -627,17 +663,17 @@ export class DashboardService {
       // Today's applications pitched by team members (unique student pitches)
       memberIds.length > 0
         ? this.prisma.leadCollege.findMany({
-            where: {
-              pitchedById: { in: memberIds },
-              createdAt: {
-                gte: startOfToday,
-                lte: endOfToday,
-              },
+          where: {
+            pitchedById: { in: memberIds },
+            createdAt: {
+              gte: startOfToday,
+              lte: endOfToday,
             },
-            select: {
-              leadId: true,
-            },
-          })
+          },
+          select: {
+            leadId: true,
+          },
+        })
         : [],
     ]);
 
@@ -648,11 +684,11 @@ export class DashboardService {
           assignedToId: { in: memberIds },
           ...(startDate || endDate
             ? {
-                assignedAt: {
-                  ...(startDate && { gte: startDate }),
-                  ...(endDate && { lte: endDate }),
-                },
-              }
+              assignedAt: {
+                ...(startDate && { gte: startDate }),
+                ...(endDate && { lte: endDate }),
+              },
+            }
             : {}),
         },
         include: {
@@ -675,11 +711,11 @@ export class DashboardService {
           createdById: { in: memberIds },
           ...(startDate || endDate
             ? {
-                createdAt: {
-                  ...(startDate && { gte: startDate }),
-                  ...(endDate && { lte: endDate }),
-                },
-              }
+              createdAt: {
+                ...(startDate && { gte: startDate }),
+                ...(endDate && { lte: endDate }),
+              },
+            }
             : {}),
         },
         include: {
@@ -700,11 +736,11 @@ export class DashboardService {
           userId: { in: memberIds },
           ...(startDate || endDate
             ? {
-                createdAt: {
-                  ...(startDate && { gte: startDate }),
-                  ...(endDate && { lte: endDate }),
-                },
-              }
+              createdAt: {
+                ...(startDate && { gte: startDate }),
+                ...(endDate && { lte: endDate }),
+              },
+            }
             : {}),
         },
         include: {
@@ -743,55 +779,55 @@ export class DashboardService {
         // Leads created/posted today by team members or assigned to team members today
         memberIds.length > 0
           ? this.prisma.lead.findMany({
-              where: {
-                OR: [
-                  { createdById: { in: memberIds } },
-                  { assignments: { some: { userId: { in: memberIds } } } },
-                ],
-                createdAt: {
-                  gte: startOfToday,
-                  lte: endOfToday,
+            where: {
+              OR: [
+                { createdById: { in: memberIds } },
+                { assignments: { some: { userId: { in: memberIds } } } },
+              ],
+              createdAt: {
+                gte: startOfToday,
+                lte: endOfToday,
+              },
+            },
+            include: {
+              status: true,
+              createdBy: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  email: true,
                 },
               },
-              include: {
-                status: true,
-                createdBy: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                  },
-                },
-                assignments: {
-                  where: { status: 'ACTIVE' },
-                  include: {
-                    user: {
-                      select: { id: true, firstName: true, lastName: true },
-                    },
+              assignments: {
+                where: { status: 'ACTIVE' },
+                include: {
+                  user: {
+                    select: { id: true, firstName: true, lastName: true },
                   },
                 },
               },
-              orderBy: { createdAt: 'desc' },
-            })
+            },
+            orderBy: { createdAt: 'desc' },
+          })
           : [],
 
         // All team leads (created by or assigned to team members + manager)
         memberIds.length > 0
           ? this.prisma.lead.findMany({
-              where: {
-                OR: [
-                  { createdById: { in: memberIds } },
-                  { assignments: { some: { userId: { in: memberIds } } } },
-                ],
+            where: {
+              OR: [
+                { createdById: { in: memberIds } },
+                { assignments: { some: { userId: { in: memberIds } } } },
+              ],
+            },
+            include: {
+              status: true,
+              interactions: {
+                select: { id: true, createdAt: true },
               },
-              include: {
-                status: true,
-                interactions: {
-                  select: { id: true, createdAt: true },
-                },
-              },
-            })
+            },
+          })
           : [],
       ]);
 
@@ -1412,6 +1448,7 @@ export class DashboardService {
       recentActivityLogs,
       activeDataAssignments,
       admissionDoneLeads,
+      todaysCallRecords,
     ] = await Promise.all([
       // 1. All active teams with manager and members (users)
       this.prisma.team.findMany({
@@ -1427,7 +1464,7 @@ export class DashboardService {
         orderBy: { name: 'asc' },
       }),
 
-      // 2. All active advisors (sales & program advisor roles)
+      // 2. All active advisors, callers, team leads, or any user with assigned data or call activity
       this.prisma.user.findMany({
         where: {
           status: 'ACTIVE',
@@ -1437,6 +1474,11 @@ export class DashboardService {
             { role: { name: { contains: 'Counselor', mode: 'insensitive' } } },
             { role: { name: { contains: 'Counsellor', mode: 'insensitive' } } },
             { role: { name: { contains: 'Executive', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Caller', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Telecaller', mode: 'insensitive' } } },
+            { role: { name: { contains: 'Lead', mode: 'insensitive' } } },
+            { assignedDataAssignments: { some: { status: 'ACTIVE' } } },
+            { callRecordsCreated: { some: {} } },
           ],
         },
         include: {
@@ -1555,24 +1597,67 @@ export class DashboardService {
         },
       }),
 
-      // 6. Interviews scheduled or conducted today
-      this.prisma.interview.findMany({
+      // 6. Lead Interviews scheduled or conducted today
+      this.prisma.leadCollegeInterview.findMany({
         where: {
           scheduledAt: { gte: startOfToday, lte: endOfToday },
         },
         include: {
-          candidate: { include: { position: true } },
-          interviewer: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              team: {
+          leadCollege: {
+            include: {
+              lead: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  phone: true,
+                  courseInterested: true,
+                  assignments: {
+                    where: { status: 'ACTIVE' },
+                    include: {
+                      user: {
+                        select: {
+                          id: true,
+                          firstName: true,
+                          lastName: true,
+                          team: {
+                            select: {
+                              id: true,
+                              name: true,
+                              manager: {
+                                select: {
+                                  id: true,
+                                  firstName: true,
+                                  lastName: true,
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              college: {
                 select: {
                   id: true,
                   name: true,
-                  manager: {
-                    select: { id: true, firstName: true, lastName: true },
+                },
+              },
+              pitchedBy: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  team: {
+                    select: {
+                      id: true,
+                      name: true,
+                      manager: {
+                        select: { id: true, firstName: true, lastName: true },
+                      },
+                    },
                   },
                 },
               },
@@ -1701,7 +1786,11 @@ export class DashboardService {
       // 16. Attendance records for today
       this.prisma.attendance.findMany({
         where: {
-          date: { gte: startOfToday, lte: endOfToday },
+          OR: [
+            { date: { gte: startOfToday, lte: endOfToday } },
+            { checkIn: { gte: startOfToday, lte: endOfToday } },
+            { createdAt: { gte: startOfToday, lte: endOfToday } },
+          ],
         },
         include: {
           user: {
@@ -1784,6 +1873,50 @@ export class DashboardService {
           },
         },
       }),
+
+      // 21. CallRecords logged today
+      this.prisma.callRecord.findMany({
+        where: {
+          createdAt: { gte: startOfToday, lte: endOfToday },
+        },
+        include: {
+          studentData: {
+            select: {
+              id: true,
+              firstName: true,
+              middleName: true,
+              lastName: true,
+              phone: true,
+            },
+          },
+          lead: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              status: { select: { name: true } },
+            },
+          },
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              team: {
+                select: {
+                  id: true,
+                  name: true,
+                  manager: {
+                    select: { id: true, firstName: true, lastName: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
     ]);
 
     // Format 1. Leads Today List
@@ -1823,7 +1956,52 @@ export class DashboardService {
     });
 
     // Format 2. Calls Today List
+    const outcomeLabelMap: Record<string, string> = {
+      NO_ANSWER: 'No Answer',
+      WRONG_NUMBER: 'Wrong Number',
+      NOT_INTERESTED: 'Not Interested',
+      FOLLOW_UP: 'Follow Up Required',
+      CALL_BACK_LATER: 'Call Back Later',
+      INTERESTED: 'Interested / Create Lead',
+    };
+
     const callsTodayList = [
+      ...todaysCallRecords.map((c) => {
+        const advTeam = c.createdBy?.team;
+        const advManager = advTeam?.manager;
+        const studentName = c.studentData
+          ? [c.studentData.firstName, c.studentData.middleName, c.studentData.lastName].filter(Boolean).join(' ')
+          : c.lead
+            ? `${c.lead.firstName} ${c.lead.lastName || ''}`.trim()
+            : 'Student Contact';
+
+        const phone = c.studentData?.phone || c.lead?.phone || 'N/A';
+        const durationStr = c.durationSeconds !== null && c.durationSeconds !== undefined
+          ? `${Math.floor(c.durationSeconds / 60)}m ${c.durationSeconds % 60}s`
+          : 'N/A';
+
+        return {
+          id: c.id,
+          student: studentName,
+          leadId: c.leadId || null,
+          studentDataId: c.studentDataId || null,
+          phone,
+          advisor: c.createdBy
+            ? `${c.createdBy.firstName} ${c.createdBy.lastName || ''}`.trim()
+            : 'Advisor',
+          advisorId: c.createdById,
+          team: advTeam?.name || 'Unassigned',
+          teamId: advTeam?.id || null,
+          manager: advManager
+            ? `${advManager.firstName} ${advManager.lastName || ''}`.trim()
+            : 'Unassigned',
+          callTime: (c.startedAt || c.createdAt).toISOString(),
+          duration: durationStr,
+          callOutcome: outcomeLabelMap[c.outcome] || c.outcome,
+          leadStatus: c.lead?.status?.name || 'PROSPECT',
+          notes: c.notes || null,
+        };
+      }),
       ...todaysInteractions.map((i) => {
         const advTeam = i.createdBy.team;
         const advManager = advTeam?.manager;
@@ -1831,6 +2009,7 @@ export class DashboardService {
           id: i.id,
           student: `${i.lead.firstName} ${i.lead.lastName || ''}`.trim(),
           leadId: i.lead.id,
+          studentDataId: null,
           phone: i.lead.phone,
           advisor:
             `${i.createdBy.firstName} ${i.createdBy.lastName || ''}`.trim(),
@@ -1844,6 +2023,7 @@ export class DashboardService {
           duration: 'Not Available',
           callOutcome: i.title || i.description.slice(0, 40) || 'Logged Call',
           leadStatus: i.lead.status?.name || 'LEAD',
+          notes: i.description || null,
         };
       }),
       ...todaysTpcUsers.map((t) => ({
@@ -1852,6 +2032,7 @@ export class DashboardService {
           ? `${t.tpc.lead.firstName} ${t.tpc.lead.lastName || ''}`.trim()
           : 'Lead',
         leadId: t.tpc?.lead?.id || null,
+        studentDataId: null,
         phone: t.tpc?.lead?.phone || 'Not Available',
         advisor: t.assignedTo
           ? `${t.assignedTo.firstName} ${t.assignedTo.lastName || ''}`.trim()
@@ -1864,6 +2045,7 @@ export class DashboardService {
         duration: 'Not Available',
         callOutcome: `TPC: ${t.status}`,
         leadStatus: 'TPC',
+        notes: null,
       })),
     ].sort(
       (a, b) => new Date(b.callTime).getTime() - new Date(a.callTime).getTime(),
@@ -1872,21 +2054,36 @@ export class DashboardService {
     // Format 3. Attendance Today List
     const attendanceUserIds = new Set(todayAttendances.map((a) => a.userId));
     const attendanceList = [
-      ...todayAttendances.map((a) => ({
-        id: a.id,
-        userId: a.userId,
-        employee: `${a.user.firstName} ${a.user.lastName || ''}`.trim(),
-        role: a.user.role?.name || 'Employee',
-        team: a.user.team?.name || 'Unassigned',
-        teamId: a.user.team?.id || null,
-        manager: a.user.team?.manager
-          ? `${a.user.team.manager.firstName} ${a.user.team.manager.lastName || ''}`.trim()
-          : 'Unassigned',
-        status: a.status,
-        checkIn: a.checkIn ? a.checkIn.toISOString() : '09:30 AM',
-        checkOut: a.checkOut ? a.checkOut.toISOString() : '06:30 PM',
-        workingHours: '8 hrs 30 mins',
-      })),
+      ...todayAttendances.map((a) => {
+        let workDuration = 'N/A';
+        if (a.checkIn && a.checkOut) {
+          const diffMs = a.checkOut.getTime() - a.checkIn.getTime();
+          if (diffMs > 0) {
+            const mins = Math.floor(diffMs / (1000 * 60));
+            workDuration = `${Math.floor(mins / 60)} hrs ${mins % 60} mins`;
+          } else {
+            workDuration = '0 hrs 0 mins';
+          }
+        } else if (a.checkIn) {
+          workDuration = 'Ongoing';
+        }
+
+        return {
+          id: a.id,
+          userId: a.userId,
+          employee: `${a.user.firstName} ${a.user.lastName || ''}`.trim(),
+          role: a.user.role?.name || 'Employee',
+          team: a.user.team?.name || 'Unassigned',
+          teamId: a.user.team?.id || null,
+          manager: a.user.team?.manager
+            ? `${a.user.team.manager.firstName} ${a.user.team.manager.lastName || ''}`.trim()
+            : 'Unassigned',
+          status: a.status,
+          checkIn: a.checkIn ? a.checkIn.toISOString() : 'Not Checked In',
+          checkOut: a.checkOut ? a.checkOut.toISOString() : 'Not Checked Out',
+          workingHours: workDuration,
+        };
+      }),
       ...allActiveUsers
         .filter((u) => !attendanceUserIds.has(u.id))
         .map((u) => ({
@@ -1899,49 +2096,62 @@ export class DashboardService {
           manager: u.team?.manager
             ? `${u.team.manager.firstName} ${u.team.manager.lastName || ''}`.trim()
             : 'Unassigned',
-          status: 'PRESENT' as const,
-          checkIn: '09:30 AM',
-          checkOut: '06:30 PM',
-          workingHours: '8 hrs 30 mins',
+          status: 'ABSENT' as const,
+          checkIn: 'Not Checked In',
+          checkOut: 'Not Checked Out',
+          workingHours: 'N/A',
         })),
     ];
 
     const presentCount = attendanceList.filter(
-      (a) => a.status === 'PRESENT',
+      (a) => a.status === 'PRESENT' || a.status === 'HALF_DAY',
     ).length;
     const absentCount = attendanceList.filter(
       (a) => a.status === 'ABSENT',
     ).length;
     const leaveCount = attendanceList.filter(
-      (a) => a.status === 'LEAVE',
+      (a) => a.status === 'LEAVE' || a.status === 'CASUAL_LEAVE',
     ).length;
 
-    // Format 4. Interviews Today List
-    const interviewsList = todaysInterviews.map((i) => ({
-      id: i.id,
-      candidateName:
-        `${i.candidate.firstName} ${i.candidate.lastName || ''}`.trim(),
-      candidateId: i.candidate.id,
-      interviewTime: i.scheduledAt.toISOString(),
-      college: 'Not Available',
-      course: i.candidate.position?.title || 'General Applicant',
-      status: i.status,
-      result: i.result,
-      advisor:
-        `${i.interviewer.firstName} ${i.interviewer.lastName || ''}`.trim(),
-      advisorId: i.interviewer.id,
-      team: i.interviewer.team?.name || 'Unassigned',
-      teamId: i.interviewer.team?.id || null,
-      manager: i.interviewer.team?.manager
-        ? `${i.interviewer.team.manager.firstName} ${i.interviewer.team.manager.lastName || ''}`.trim()
-        : 'Unassigned',
-    }));
+    // Format 4. Student Lead Interviews Today List
+    const interviewsList = todaysInterviews.map((i) => {
+      const lead = i.leadCollege?.lead;
+      const activeAssign = lead?.assignments[0];
+      const assignedUser = activeAssign?.user || i.leadCollege?.pitchedBy;
+      const teamObj = assignedUser?.team;
+      const managerObj = teamObj?.manager;
+
+      return {
+        id: i.id,
+        candidateName: lead
+          ? `${lead.firstName} ${lead.lastName || ''}`.trim()
+          : 'Student Lead',
+        candidateId: lead?.id || i.id,
+        interviewTime: i.scheduledAt.toISOString(),
+        college: i.leadCollege?.college?.name || 'Not Available',
+        course:
+          i.leadCollege?.coursePitched ||
+          lead?.courseInterested ||
+          'Interview Scheduled',
+        status: i.status,
+        result: i.result,
+        advisor: assignedUser
+          ? `${assignedUser.firstName} ${assignedUser.lastName || ''}`.trim()
+          : 'Unassigned',
+        advisorId: assignedUser?.id || null,
+        team: teamObj?.name || 'Unassigned',
+        teamId: teamObj?.id || null,
+        manager: managerObj
+          ? `${managerObj.firstName} ${managerObj.lastName || ''}`.trim()
+          : 'Unassigned',
+      };
+    });
 
     const interviewsScheduledCount = interviewsList.filter(
       (i) => i.status === 'SCHEDULED',
     ).length;
     const interviewsCompletedCount = interviewsList.filter(
-      (i) => i.status === 'COMPLETED',
+      (i) => i.status === 'COMPLETED' || i.result === 'PASSED' || i.result === 'FAILED',
     ).length;
     const interviewsPendingCount = interviewsList.filter(
       (i) => i.result === 'PENDING',
@@ -2024,7 +2234,9 @@ export class DashboardService {
       ).length;
 
       const teamAttendancePresent = attendanceList.filter(
-        (a) => a.teamId === team.id && a.status === 'PRESENT',
+        (a) =>
+          a.teamId === team.id &&
+          (a.status === 'PRESENT' || a.status === 'HALF_DAY'),
       ).length;
 
       return {
@@ -2757,17 +2969,17 @@ export class DashboardService {
             : 0,
         topCounselor: topCounselorObj
           ? {
-              name: topCounselorObj.employeeName,
-              admissions: topCounselorObj.admissions,
-              team: topCounselorObj.teamName,
-            }
+            name: topCounselorObj.employeeName,
+            admissions: topCounselorObj.admissions,
+            team: topCounselorObj.teamName,
+          }
           : null,
         topConverter: topConverterObj
           ? {
-              name: topConverterObj.employeeName,
-              conversionRate: topConverterObj.conversionRate,
-              team: topConverterObj.teamName,
-            }
+            name: topConverterObj.employeeName,
+            conversionRate: topConverterObj.conversionRate,
+            team: topConverterObj.teamName,
+          }
           : null,
       },
       filtersMeta: {

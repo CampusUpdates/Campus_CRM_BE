@@ -3,6 +3,7 @@ import { UsersService } from './users.service';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ActivityLogService } from 'src/activity-log/activity-log.service';
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
 import { ForbiddenException, ConflictException } from '@nestjs/common';
 import { UserStatus } from '@prisma/client';
 
@@ -44,6 +45,17 @@ describe('UsersService - Single Super Admin Enforcements', () => {
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: JwtService, useValue: mockJwtService },
         { provide: ActivityLogService, useValue: mockActivityLogService },
+        {
+          provide: TeamLeadAuthorizationService,
+          useValue: {
+            isTeamLead: jest.fn().mockResolvedValue(false),
+            getTeamLeadAdvisorIds: jest.fn().mockResolvedValue([]),
+            getTeamLeadAssignedTeamIds: jest.fn().mockResolvedValue([]),
+            canTeamLeadAccessTeam: jest.fn().mockResolvedValue(false),
+            canTeamLeadAccessAdvisor: jest.fn().mockResolvedValue(false),
+            canTeamLeadAccessLead: jest.fn().mockResolvedValue(false),
+          },
+        },
       ],
     }).compile();
 

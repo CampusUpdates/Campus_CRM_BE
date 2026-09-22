@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Test {
@@ -47,15 +48,17 @@ model RolePermission {
 }
 
 model Team {
-  id          Int      @id @default(autoincrement())
-  name        String   @unique
+  id          Int        @id @default(autoincrement())
+  name        String     @unique
   description String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  managerId   String   @db.Uuid
-  manager     User     @relation("TeamManager", fields: [managerId], references: [id])
-  users       User[]   @relation("TeamMembers")
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  managerId   String     @db.Uuid
+  manager     User       @relation("TeamManager", fields: [managerId], references: [id])
+  users       User[]     @relation("TeamMembers")
+  leads       Lead[]
+  teamLeads   TeamLead[]
 
   @@index([managerId])
 }
@@ -104,10 +107,36 @@ model User {
   tpcAssignmentsCompleted     TPCUser[]               @relation("TPCCompletedBy")
   teamsManaged                Team[]                  @relation("TeamManager")
   todos                       Todo[]                  @relation("UserTodos")
+  callRecordsCreated          CallRecord[]            @relation("CallRecordsCreated")
   manager                     User?                   @relation("UserManager", fields: [managerId], references: [id])
   subordinates                User[]                  @relation("UserManager")
   role                        Role                    @relation(fields: [roleId], references: [id])
   team                        Team?                   @relation("TeamMembers", fields: [teamId], references: [id])
+  teamLeads                   TeamLead[]              @relation("TeamLeadUser")
+  advisors                    TeamLeadAdvisor[]       @relation("TeamLeadAdvisors")
+  teamLeadAdvisors            TeamLeadAdvisor[]       @relation("AdvisorTeamLeads")
+}
+
+model TeamLead {
+  teamId    Int
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation("TeamLeadUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@index([userId])
+}
+
+model TeamLeadAdvisor {
+  teamLeadId String   @db.Uuid
+  advisorId  String   @db.Uuid
+  assignedAt DateTime @default(now())
+  teamLead   User     @relation("TeamLeadAdvisors", fields: [teamLeadId], references: [id], onDelete: Cascade)
+  advisor    User     @relation("AdvisorTeamLeads", fields: [advisorId], references: [id], onDelete: Cascade)
+
+  @@id([teamLeadId, advisorId])
+  @@index([advisorId])
 }
 
 model Course {
@@ -180,6 +209,7 @@ model Lead {
   id                       String                 @id @default(uuid()) @db.Uuid
   statusId                 Int
   createdById              String                 @db.Uuid
+  teamId                   Int?
   firstName                String
   lastName                 String?
   phone                    String
@@ -203,6 +233,7 @@ model Lead {
   finalCollegeId           String?                @db.Uuid
   interactions             Interaction[]
   createdBy                User                   @relation("LeadCreator", fields: [createdById], references: [id])
+  team                     Team?                  @relation(fields: [teamId], references: [id], onDelete: SetNull)
   finalCollege             College?               @relation("FinalCollege", fields: [finalCollegeId], references: [id], onDelete: SetNull)
   status                   LeadStatus             @relation(fields: [statusId], references: [id])
   assignments              LeadAssignment[]
@@ -210,9 +241,11 @@ model Lead {
   collegeApplications      LeadCollege[]
   ownershipHistories       LeadOwnershipHistory[]
   tpcs                     TPC[]
+  callRecords              CallRecord[]
 
   @@index([statusId])
   @@index([createdById])
+  @@index([teamId])
   @@index([finalCollegeId])
 }
 
@@ -405,6 +438,7 @@ model StudentData {
   createdAt       DateTime             @default(now())
   assignmentItems DataAssignmentItem[]
   upload          DataUpload           @relation(fields: [uploadId], references: [id])
+  callRecords     CallRecord[]
 
   @@index([uploadId])
   @@index([phone])
@@ -477,19 +511,20 @@ model ActivityLog {
 }
 
 model Office {
-  id               Int                @id @default(autoincrement())
-  name             String             @unique
-  address          String?
-  city             String?
-  state            String?
-  latitude         Float?
-  longitude        Float?
-  radiusMeters     Int                @default(100)
-  isActive         Boolean            @default(true)
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
-  attendance       Attendance[]
-  attendancePolicy AttendancePolicy?
+  id                        Int               @id @default(autoincrement())
+  name                      String            @unique
+  address                   String?
+  city                      String?
+  state                     String?
+  latitude                  Float?
+  longitude                 Float?
+  radiusMeters              Int               @default(100)
+  isActive                  Boolean           @default(true)
+  locationValidationEnabled Boolean           @default(true)
+  createdAt                 DateTime          @default(now())
+  updatedAt                 DateTime          @updatedAt
+  attendance                Attendance[]
+  attendancePolicy          AttendancePolicy?
 }
 
 model AttendancePolicy {
@@ -843,4 +878,35 @@ enum OwnershipChangeReason {
   INITIAL_ASSIGNMENT
   CLAIM_APPROVED
   ADMIN_REASSIGNMENT
+}
+
+enum CallOutcome {
+  NO_ANSWER
+  WRONG_NUMBER
+  NOT_INTERESTED
+  FOLLOW_UP
+  CALL_BACK_LATER
+  INTERESTED
+}
+
+model CallRecord {
+  id              String      @id @default(uuid()) @db.Uuid
+  studentDataId   String      @db.Uuid
+  leadId          String?     @db.Uuid
+  createdById     String      @db.Uuid
+  outcome         CallOutcome
+  notes           String?
+  startedAt       DateTime?
+  endedAt         DateTime?
+  durationSeconds Int?
+  createdAt       DateTime    @default(now())
+
+  studentData StudentData @relation(fields: [studentDataId], references: [id])
+  lead        Lead?       @relation(fields: [leadId], references: [id])
+  createdBy   User        @relation("CallRecordsCreated", fields: [createdById], references: [id])
+
+  @@index([studentDataId])
+  @@index([leadId])
+  @@index([createdById])
+  @@index([createdAt])
 }

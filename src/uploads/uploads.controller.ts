@@ -26,7 +26,7 @@ export class UploadsController {
   constructor(
     private readonly uploadsService: UploadsService,
     private readonly prisma: PrismaService,
-  ) {}
+  ) { }
 
   private async assertAdminOrManager(userId: string, roleId: number) {
     // Role ID 1: SUPER_ADMIN, Role ID 3: MANAGER
@@ -111,6 +111,15 @@ export class UploadsController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 10,
     );
+  }
+
+  @Get('data-assignments/:id')
+  async findAssignmentDetails(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.findAssignmentDetails(id);
   }
 
   @Post('assign-data')

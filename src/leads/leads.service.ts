@@ -20,6 +20,8 @@ import {
 import { ProcessClaimRequestDto } from './dto/process-claim-request.dto';
 import { QueryClaimRequestDto } from './dto/query-claim-request.dto';
 
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
+
 // CENTRALIZED SOURCE OF TRUTH FOR LEAD ASSIGNMENT ELIGIBILITY PREDICATE
 export const buildAssignableLeadsWhere = (now: Date = new Date()) => ({
   status: {
@@ -42,7 +44,8 @@ export class LeadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
-  ) {}
+    private readonly teamLeadAuthService: TeamLeadAuthorizationService,
+  ) { }
 
   private async validateAndGetCollegePitches(tx: any, collegeIds: string[]) {
     const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -152,10 +155,36 @@ export class LeadsService {
       );
     }
 
+    const creatorUser = this.prisma.user
+      ? await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { teamId: true },
+        })
+      : null;
+    let resolvedTeamId: number | null = creatorUser?.teamId || null;
+
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(userId);
+    if (isTeamLead) {
+      const assignedTeamIds =
+        await this.teamLeadAuthService.getTeamLeadAssignedTeamIds(userId);
+      if (createLeadDto.teamId) {
+        if (assignedTeamIds.includes(createLeadDto.teamId)) {
+          resolvedTeamId = createLeadDto.teamId;
+        } else {
+          throw new ForbiddenException(
+            'You are not authorized for the requested team.',
+          );
+        }
+      } else if (assignedTeamIds.length > 0) {
+        resolvedTeamId = assignedTeamIds[0];
+      }
+    }
+
     const {
       collegeIds,
       dateOfBirth: rawDob,
       statusId: _,
+      teamId: __,
       ...leadData
     } = createLeadDto;
     const dateOfBirth = rawDob ? new Date(rawDob) : undefined;
@@ -167,23 +196,25 @@ export class LeadsService {
       async (tx) => {
         const lead = existingLead
           ? await tx.lead.update({
-              where: {
-                id: existingLead.id,
-              },
-              data: {
-                ...leadData,
-                ...(dateOfBirth && { dateOfBirth }),
-                statusId: targetStatusId,
-              },
-            })
+            where: {
+              id: existingLead.id,
+            },
+            data: {
+              ...leadData,
+              ...(dateOfBirth && { dateOfBirth }),
+              statusId: targetStatusId,
+              ...(resolvedTeamId && { teamId: resolvedTeamId }),
+            },
+          })
           : await tx.lead.create({
-              data: {
-                ...leadData,
-                ...(dateOfBirth && { dateOfBirth }),
-                statusId: targetStatusId,
-                createdById: userId,
-              },
-            });
+            data: {
+              ...leadData,
+              ...(dateOfBirth && { dateOfBirth }),
+              statusId: targetStatusId,
+              createdById: userId,
+              ...(resolvedTeamId && { teamId: resolvedTeamId }),
+            },
+          });
 
         if (collegeIds && collegeIds.length > 0) {
           const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -194,13 +225,13 @@ export class LeadsService {
 
           const creatorUser = tx.user
             ? await tx.user.findUnique({
-                where: { id: userId },
-                select: {
-                  firstName: true,
-                  lastName: true,
-                  role: { select: { name: true } },
-                },
-              })
+              where: { id: userId },
+              select: {
+                firstName: true,
+                lastName: true,
+                role: { select: { name: true } },
+              },
+            })
             : null;
 
           const creatorRoleName = creatorUser?.role?.name
@@ -366,6 +397,8 @@ export class LeadsService {
 
     const managedTeamMemberIds = await this.getManagerTeamMemberIds(user.sub);
 
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+
     if (normalizedRole.includes('ADMIN') || scope === 'ALL') {
       baseScopeWhere = {};
     } else if (isManagerRole || scope === 'MANAGED') {
@@ -394,6 +427,25 @@ export class LeadsService {
                     { managerId: user.sub },
                   ],
                 },
+              },
+            },
+          },
+        ],
+      };
+    } else if (isTeamLead) {
+      const supervisedAdvisorIds =
+        await this.teamLeadAuthService.getTeamLeadAdvisorIds(user.sub);
+      const authorizedUserIds = Array.from(
+        new Set([user.sub, ...supervisedAdvisorIds]),
+      );
+
+      baseScopeWhere = {
+        OR: [
+          { createdById: { in: authorizedUserIds } },
+          {
+            assignments: {
+              some: {
+                userId: { in: authorizedUserIds },
               },
             },
           },
@@ -767,7 +819,7 @@ export class LeadsService {
       }
     }
 
-    const activeAssignment = lead.assignments[0];
+    const activeAssignment = lead.assignments?.[0];
 
     const isCreator = lead.createdById === user.sub;
     const isAssigned = activeAssignment?.userId === user.sub;
@@ -776,7 +828,16 @@ export class LeadsService {
       user.teamId &&
       activeAssignment?.user?.teamId === user.teamId;
 
-    if (scope !== 'ALL' && !isCreator && !isAssigned && !isSameTeam) {
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+    let isTLAccess = false;
+    if (isTeamLead) {
+      isTLAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+        user.sub,
+        leadId,
+      );
+    }
+
+    if (scope !== 'ALL' && !isCreator && !isAssigned && !isSameTeam && !isTLAccess) {
       throw new ForbiddenException(
         'You do not have permission to update this lead.',
       );
@@ -824,13 +885,13 @@ export class LeadsService {
 
             const creatorUser = tx.user
               ? await tx.user.findUnique({
-                  where: { id: user.sub },
-                  select: {
-                    firstName: true,
-                    lastName: true,
-                    role: { select: { name: true } },
-                  },
-                })
+                where: { id: user.sub },
+                select: {
+                  firstName: true,
+                  lastName: true,
+                  role: { select: { name: true } },
+                },
+              })
               : null;
 
             const creatorRoleName = creatorUser?.role?.name
@@ -1056,8 +1117,21 @@ export class LeadsService {
     const isAdminRole =
       normalizedRole.includes('ADMIN') || normalizedRole === 'HR';
 
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+
     if (isAdminRole || scope === 'ALL') {
       return lead;
+    }
+
+    if (isTeamLead && !isManagerRole) {
+      const hasTLAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+        user.sub,
+        lead.id,
+      );
+      if (hasTLAccess) {
+        return lead;
+      }
+      throw new ForbiddenException('Access denied: You do not have access to this lead.');
     }
 
     const isCreator = lead.createdById === user.sub;
@@ -1107,7 +1181,7 @@ export class LeadsService {
     throw new ForbiddenException('You do not have access to this lead.');
   }
 
-  async searchByPhone(phone: string) {
+  async searchByPhone(phone: string, user?: { sub: string }) {
     const lead = await this.prisma.lead.findFirst({
       where: {
         phone,
@@ -1160,6 +1234,19 @@ export class LeadsService {
       return {
         exists: false,
       };
+    }
+
+    if (user?.sub) {
+      const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+      if (isTeamLead) {
+        const canAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+          user.sub,
+          lead.id,
+        );
+        if (!canAccess) {
+          return { exists: false };
+        }
+      }
     }
 
     return {
@@ -1338,6 +1425,39 @@ export class LeadsService {
   ) {
     const now = new Date();
 
+    const callerRecord = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const callerRole = (callerRecord?.role?.name || '').toUpperCase();
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(callerRole);
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+
+    if (isTeamLead && !isSuperOrHr) {
+      const canAccessLead = await this.teamLeadAuthService.canTeamLeadAccessLead(
+        managerUser.sub,
+        leadId,
+      );
+      if (!canAccessLead) {
+        throw new ForbiddenException(
+          'Access denied: You are not authorized to assign this lead.',
+        );
+      }
+
+      if (targetUserId !== managerUser.sub) {
+        const isSupervisedPA =
+          await this.teamLeadAuthService.canTeamLeadAccessAdvisor(
+            managerUser.sub,
+            targetUserId,
+          );
+        if (!isSupervisedPA) {
+          throw new ForbiddenException(
+            'Team Leads can only assign leads to Program Advisors explicitly supervised by them in the same team.',
+          );
+        }
+      }
+    }
+
     const targetUser = await this.prisma.user.findUnique({
       where: { id: targetUserId },
       select: { id: true, status: true },
@@ -1470,6 +1590,29 @@ export class LeadsService {
   ) {
     const { quantity, targetUserId, teamId } = dto;
     const now = new Date();
+
+    const callerRecord = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const callerRole = (callerRecord?.role?.name || '').toUpperCase();
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(callerRole);
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+
+    if (isTeamLead && !isSuperOrHr) {
+      if (targetUserId !== managerUser.sub) {
+        const isSupervisedPA =
+          await this.teamLeadAuthService.canTeamLeadAccessAdvisor(
+            managerUser.sub,
+            targetUserId,
+          );
+        if (!isSupervisedPA) {
+          throw new ForbiddenException(
+            'Team Leads can only assign bulk leads to Program Advisors explicitly supervised by them in the same team.',
+          );
+        }
+      }
+    }
 
     const targetUser = await this.prisma.user.findUnique({
       where: { id: targetUserId },
@@ -1683,9 +1826,22 @@ export class LeadsService {
       whereClause.approvalStatus = statusFilter;
     }
 
-    if (scope === 'TEAM') {
-      const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
-      whereClause.pitchedById = { in: memberIds };
+    const callerUser = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = (callerUser?.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+
+    if (!isSuperAdmin) {
+      const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+      if (isTeamLead) {
+        const supervisedAdvisorIds = await this.teamLeadAuthService.getTeamLeadAdvisorIds(managerUser.sub);
+        whereClause.pitchedById = { in: Array.from(new Set([managerUser.sub, ...supervisedAdvisorIds])) };
+      } else if (scope === 'TEAM') {
+        const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
+        whereClause.pitchedById = { in: memberIds };
+      }
     }
 
     return this.prisma.leadCollege.findMany({
@@ -1769,12 +1925,30 @@ export class LeadsService {
       return pitch;
     }
 
-    if (scope === 'TEAM') {
-      const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
-      if (!memberIds.includes(pitch.pitchedById)) {
-        throw new ForbiddenException(
-          'You can only process pitch requests for your team members.',
-        );
+    const callerUser = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = (callerUser?.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+
+    if (!isSuperAdmin) {
+      const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+      if (isTeamLead) {
+        const supervisedAdvisorIds = await this.teamLeadAuthService.getTeamLeadAdvisorIds(managerUser.sub);
+        const authorizedUserIds = Array.from(new Set([managerUser.sub, ...supervisedAdvisorIds]));
+        if (!authorizedUserIds.includes(pitch.pitchedById)) {
+          throw new ForbiddenException(
+            'You can only process college approval requests for yourself or your supervised Program Advisors.',
+          );
+        }
+      } else if (scope === 'TEAM') {
+        const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
+        if (!memberIds.includes(pitch.pitchedById)) {
+          throw new ForbiddenException(
+            'You can only process pitch requests for your team members.',
+          );
+        }
       }
     }
 
@@ -1835,6 +2009,32 @@ export class LeadsService {
     );
   }
 
+  /**
+   * Resolve the exact LeadCollege record to target.
+   * Prefers explicit `leadCollegeId` (exact match) over `collegeId` (lookup).
+   * Returns the LeadCollege with its `college` and `status` relations included,
+   * or null if no match is found.
+   */
+  private async resolveLeadCollege(
+    tx: any,
+    leadId: string,
+    dto: { leadCollegeId?: string; collegeId?: string },
+  ) {
+    if (dto.leadCollegeId) {
+      return tx.leadCollege.findFirst({
+        where: { id: dto.leadCollegeId, leadId },
+        include: { college: true, status: true },
+      });
+    }
+    if (dto.collegeId) {
+      return tx.leadCollege.findFirst({
+        where: { leadId, collegeId: dto.collegeId },
+        include: { college: true, status: true },
+      });
+    }
+    return null;
+  }
+
   async updatePipeline(
     leadId: string,
     dto: UpdateLeadPipelineDto,
@@ -1887,7 +2087,7 @@ export class LeadsService {
         }
 
         // Check access scope
-        const activeAssignment = lead.assignments[0];
+        const activeAssignment = lead.assignments?.[0];
         const isCreator = lead.createdById === user.sub;
         const isAssigned = activeAssignment?.userId === user.sub;
         const isSameTeam =
@@ -1895,7 +2095,16 @@ export class LeadsService {
           user.teamId &&
           activeAssignment?.user?.teamId === user.teamId;
 
-        if (scope !== 'ALL' && !isCreator && !isAssigned && !isSameTeam) {
+        const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+        let isTLAccess = false;
+        if (isTeamLead) {
+          isTLAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+            user.sub,
+            leadId,
+          );
+        }
+
+        if (scope !== 'ALL' && !isCreator && !isAssigned && !isSameTeam && !isTLAccess) {
           throw new ForbiddenException(
             'You do not have permission to update pipeline status for this lead.',
           );
@@ -1937,8 +2146,8 @@ export class LeadsService {
             : null);
         const existingLeadCollege = targetCollegeId
           ? lead.collegeApplications.find(
-              (app) => app.collegeId === targetCollegeId,
-            ) || null
+            (app) => app.collegeId === targetCollegeId,
+          ) || null
           : null;
 
         if (existingLeadCollege) {
@@ -2084,10 +2293,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2136,10 +2342,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2201,10 +2404,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2243,10 +2443,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2292,10 +2489,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2318,11 +2512,8 @@ export class LeadsService {
           activityDescription = `Application cancelled for ${relevantLeadCollege.college.name}. Reason: ${dto.cancellation.reason}`;
         } else {
           // LEAD or generic global status update
-          if (dto.collegeId) {
-            relevantLeadCollege = await tx.leadCollege.findFirst({
-              where: { leadId, collegeId: dto.collegeId },
-              include: { college: true },
-            });
+          if (dto.collegeId || dto.leadCollegeId) {
+            relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
             if (relevantLeadCollege) {
               this.validatePitchApproval(relevantLeadCollege);
@@ -2334,8 +2525,11 @@ export class LeadsService {
           }
         }
 
-        // Update Lead.statusId globally (if not already updated by ADMISSION_DONE)
-        if (statusName !== 'ADMISSION_DONE') {
+        // Update Lead.statusId globally ONLY when:
+        // - ADMISSION_DONE already handled above (Lead.statusId + finalCollegeId)
+        // - College-specific transitions (relevantLeadCollege set) do NOT touch Lead.statusId
+        // - Non-college transitions (relevantLeadCollege null) update Lead.statusId normally
+        if (statusName !== 'ADMISSION_DONE' && !relevantLeadCollege) {
           await tx.lead.update({
             where: { id: leadId },
             data: { statusId: targetStatus.id },
@@ -2343,11 +2537,12 @@ export class LeadsService {
         }
 
         // Create LeadCollegeHistory audit record
+        // Use the LeadCollege's own previous statusId (not Lead.statusId)
         if (relevantLeadCollege) {
           await tx.leadCollegeHistory.create({
             data: {
               leadCollegeId: relevantLeadCollege.id,
-              fromStatusId: lead.statusId,
+              fromStatusId: relevantLeadCollege.statusId ?? lead.statusId,
               toStatusId: targetStatus.id,
               changedById: user.sub,
               remarks:
@@ -2635,25 +2830,25 @@ export class LeadsService {
           uploadedAt: studentData.upload?.uploadedAt || studentData.createdAt,
           uploadedBy: studentData.upload?.uploadedBy
             ? {
-                id: studentData.upload.uploadedBy.id,
-                name: `${studentData.upload.uploadedBy.firstName} ${studentData.upload.uploadedBy.lastName || ''}`.trim(),
-                role: studentData.upload.uploadedBy.role?.name || 'User',
-              }
+              id: studentData.upload.uploadedBy.id,
+              name: `${studentData.upload.uploadedBy.firstName} ${studentData.upload.uploadedBy.lastName || ''}`.trim(),
+              role: studentData.upload.uploadedBy.role?.name || 'User',
+            }
             : null,
           assignedAt: latestAssignment?.assignedAt || null,
           assignedBy: latestAssignment?.assignedBy
             ? {
-                id: latestAssignment.assignedBy.id,
-                name: `${latestAssignment.assignedBy.firstName} ${latestAssignment.assignedBy.lastName || ''}`.trim(),
-                role: latestAssignment.assignedBy.role?.name || 'User',
-              }
+              id: latestAssignment.assignedBy.id,
+              name: `${latestAssignment.assignedBy.firstName} ${latestAssignment.assignedBy.lastName || ''}`.trim(),
+              role: latestAssignment.assignedBy.role?.name || 'User',
+            }
             : null,
           assignedTo: latestAssignment?.assignedTo
             ? {
-                id: latestAssignment.assignedTo.id,
-                name: `${latestAssignment.assignedTo.firstName} ${latestAssignment.assignedTo.lastName || ''}`.trim(),
-                role: latestAssignment.assignedTo.role?.name || 'User',
-              }
+              id: latestAssignment.assignedTo.id,
+              name: `${latestAssignment.assignedTo.firstName} ${latestAssignment.assignedTo.lastName || ''}`.trim(),
+              role: latestAssignment.assignedTo.role?.name || 'User',
+            }
             : null,
         };
       }
@@ -2670,15 +2865,15 @@ export class LeadsService {
           { entityType: 'Lead', entityId: leadId },
           ...(collegeAppIds.length > 0
             ? [
-                { entityType: 'LEAD_COLLEGE', entityId: { in: collegeAppIds } },
-                { entityType: 'LeadCollege', entityId: { in: collegeAppIds } },
-              ]
+              { entityType: 'LEAD_COLLEGE', entityId: { in: collegeAppIds } },
+              { entityType: 'LeadCollege', entityId: { in: collegeAppIds } },
+            ]
             : []),
           ...(tpcIds.length > 0
             ? [
-                { entityType: 'TPC', entityId: { in: tpcIds } },
-                { entityType: 'Tpc', entityId: { in: tpcIds } },
-              ]
+              { entityType: 'TPC', entityId: { in: tpcIds } },
+              { entityType: 'Tpc', entityId: { in: tpcIds } },
+            ]
             : []),
         ],
       },
@@ -2741,10 +2936,10 @@ export class LeadsService {
 
       const pitchedByInfo = app.pitchedBy
         ? {
-            id: app.pitchedBy.id,
-            name: `${app.pitchedBy.firstName} ${app.pitchedBy.lastName || ''}`.trim(),
-            role: app.pitchedBy.role?.name || 'User',
-          }
+          id: app.pitchedBy.id,
+          name: `${app.pitchedBy.firstName} ${app.pitchedBy.lastName || ''}`.trim(),
+          role: app.pitchedBy.role?.name || 'User',
+        }
         : null;
 
       // Application info
@@ -2758,10 +2953,10 @@ export class LeadsService {
         pitchedBy: pitchedByInfo,
         processedBy: app.processedBy
           ? {
-              id: app.processedBy.id,
-              name: `${app.processedBy.firstName} ${app.processedBy.lastName || ''}`.trim(),
-              role: app.processedBy.role?.name || 'User',
-            }
+            id: app.processedBy.id,
+            name: `${app.processedBy.firstName} ${app.processedBy.lastName || ''}`.trim(),
+            role: app.processedBy.role?.name || 'User',
+          }
           : null,
       };
 
@@ -2779,18 +2974,18 @@ export class LeadsService {
       // Selection Letters
       const selection = app.selectionLetters[0]
         ? {
-            id: app.selectionLetters[0].id,
-            letterUrl: app.selectionLetters[0].letterUrl,
-            issuedAt: app.selectionLetters[0].issuedAt,
-            admissionLastDate: app.selectionLetters[0].admissionLastDate,
-            issuedBy: app.selectionLetters[0].issuedBy
-              ? {
-                  id: app.selectionLetters[0].issuedBy.id,
-                  name: `${app.selectionLetters[0].issuedBy.firstName} ${app.selectionLetters[0].issuedBy.lastName || ''}`.trim(),
-                  role: app.selectionLetters[0].issuedBy.role?.name || 'User',
-                }
-              : null,
-          }
+          id: app.selectionLetters[0].id,
+          letterUrl: app.selectionLetters[0].letterUrl,
+          issuedAt: app.selectionLetters[0].issuedAt,
+          admissionLastDate: app.selectionLetters[0].admissionLastDate,
+          issuedBy: app.selectionLetters[0].issuedBy
+            ? {
+              id: app.selectionLetters[0].issuedBy.id,
+              name: `${app.selectionLetters[0].issuedBy.firstName} ${app.selectionLetters[0].issuedBy.lastName || ''}`.trim(),
+              role: app.selectionLetters[0].issuedBy.role?.name || 'User',
+            }
+            : null,
+        }
         : null;
 
       // Payments
@@ -2805,10 +3000,10 @@ export class LeadsService {
         refundStatus: p.refundStatus,
         processedBy: p.processedBy
           ? {
-              id: p.processedBy.id,
-              name: `${p.processedBy.firstName} ${p.processedBy.lastName || ''}`.trim(),
-              role: p.processedBy.role?.name || 'User',
-            }
+            id: p.processedBy.id,
+            name: `${p.processedBy.firstName} ${p.processedBy.lastName || ''}`.trim(),
+            role: p.processedBy.role?.name || 'User',
+          }
           : null,
       }));
 
@@ -2821,10 +3016,10 @@ export class LeadsService {
         changedAt: h.createdAt,
         changedBy: h.changedBy
           ? {
-              id: h.changedBy.id,
-              name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
-              role: h.changedBy.role?.name || 'User',
-            }
+            id: h.changedBy.id,
+            name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
+            role: h.changedBy.role?.name || 'User',
+          }
           : null,
       }));
 
@@ -2865,24 +3060,24 @@ export class LeadsService {
           completedAt: assign.completedAt,
           assignedBy: assign.assignedBy
             ? {
-                id: assign.assignedBy.id,
-                name: `${assign.assignedBy.firstName} ${assign.assignedBy.lastName || ''}`.trim(),
-                role: assign.assignedBy.role?.name || 'User',
-              }
+              id: assign.assignedBy.id,
+              name: `${assign.assignedBy.firstName} ${assign.assignedBy.lastName || ''}`.trim(),
+              role: assign.assignedBy.role?.name || 'User',
+            }
             : null,
           assignedTo: assign.assignedTo
             ? {
-                id: assign.assignedTo.id,
-                name: `${assign.assignedTo.firstName} ${assign.assignedTo.lastName || ''}`.trim(),
-                role: assign.assignedTo.role?.name || 'User',
-              }
+              id: assign.assignedTo.id,
+              name: `${assign.assignedTo.firstName} ${assign.assignedTo.lastName || ''}`.trim(),
+              role: assign.assignedTo.role?.name || 'User',
+            }
             : null,
           completedBy: assign.completedBy
             ? {
-                id: assign.completedBy.id,
-                name: `${assign.completedBy.firstName} ${assign.completedBy.lastName || ''}`.trim(),
-                role: assign.completedBy.role?.name || 'User',
-              }
+              id: assign.completedBy.id,
+              name: `${assign.completedBy.firstName} ${assign.completedBy.lastName || ''}`.trim(),
+              role: assign.completedBy.role?.name || 'User',
+            }
             : null,
         });
       }
@@ -3014,10 +3209,10 @@ export class LeadsService {
       timestamp: lead.createdAt,
       actor: lead.createdBy
         ? {
-            id: lead.createdBy.id,
-            name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
-            role: lead.createdBy.role?.name || 'User',
-          }
+          id: lead.createdBy.id,
+          name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
+          role: lead.createdBy.role?.name || 'User',
+        }
         : null,
       metadata: { source: lead.source },
     });
@@ -3077,10 +3272,10 @@ export class LeadsService {
         timestamp: it.createdAt,
         actor: it.createdBy
           ? {
-              id: it.createdBy.id,
-              name: `${it.createdBy.firstName} ${it.createdBy.lastName || ''}`.trim(),
-              role: it.createdBy.role?.name || 'User',
-            }
+            id: it.createdBy.id,
+            name: `${it.createdBy.firstName} ${it.createdBy.lastName || ''}`.trim(),
+            role: it.createdBy.role?.name || 'User',
+          }
           : null,
         metadata: { attachmentsCount: it.attachments.length },
       });
@@ -3098,10 +3293,10 @@ export class LeadsService {
         timestamp: colApp.createdAt,
         actor: colApp.pitchedBy
           ? {
-              id: colApp.pitchedBy.id,
-              name: `${colApp.pitchedBy.firstName} ${colApp.pitchedBy.lastName || ''}`.trim(),
-              role: colApp.pitchedBy.role?.name || 'User',
-            }
+            id: colApp.pitchedBy.id,
+            name: `${colApp.pitchedBy.firstName} ${colApp.pitchedBy.lastName || ''}`.trim(),
+            role: colApp.pitchedBy.role?.name || 'User',
+          }
           : null,
         metadata: {
           collegeId: colApp.collegeId,
@@ -3121,10 +3316,10 @@ export class LeadsService {
           timestamp: h.createdAt,
           actor: h.changedBy
             ? {
-                id: h.changedBy.id,
-                name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
-                role: h.changedBy.role?.name || 'User',
-              }
+              id: h.changedBy.id,
+              name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
+              role: h.changedBy.role?.name || 'User',
+            }
             : null,
           metadata: {
             collegeId: colApp.collegeId,
@@ -3161,10 +3356,10 @@ export class LeadsService {
           timestamp: sl.issuedAt,
           actor: sl.issuedBy
             ? {
-                id: sl.issuedBy.id,
-                name: `${sl.issuedBy.firstName} ${sl.issuedBy.lastName || ''}`.trim(),
-                role: sl.issuedBy.role?.name || 'User',
-              }
+              id: sl.issuedBy.id,
+              name: `${sl.issuedBy.firstName} ${sl.issuedBy.lastName || ''}`.trim(),
+              role: sl.issuedBy.role?.name || 'User',
+            }
             : null,
           metadata: {
             collegeId: colApp.collegeId,
@@ -3183,10 +3378,10 @@ export class LeadsService {
           timestamp: pm.paidAt,
           actor: pm.processedBy
             ? {
-                id: pm.processedBy.id,
-                name: `${pm.processedBy.firstName} ${pm.processedBy.lastName || ''}`.trim(),
-                role: pm.processedBy.role?.name || 'User',
-              }
+              id: pm.processedBy.id,
+              name: `${pm.processedBy.firstName} ${pm.processedBy.lastName || ''}`.trim(),
+              role: pm.processedBy.role?.name || 'User',
+            }
             : null,
           metadata: {
             collegeId: colApp.collegeId,
@@ -3208,10 +3403,10 @@ export class LeadsService {
         timestamp: al.createdAt,
         actor: al.user
           ? {
-              id: al.user.id,
-              name: `${al.user.firstName} ${al.user.lastName || ''}`.trim(),
-              role: al.user.role?.name || 'User',
-            }
+            id: al.user.id,
+            name: `${al.user.firstName} ${al.user.lastName || ''}`.trim(),
+            role: al.user.role?.name || 'User',
+          }
           : null,
         metadata: {
           activity: al.activity,
@@ -3298,17 +3493,17 @@ export class LeadsService {
         },
         finalCollege: lead.finalCollege
           ? {
-              id: lead.finalCollege.id,
-              name: lead.finalCollege.name,
-            }
+            id: lead.finalCollege.id,
+            name: lead.finalCollege.name,
+          }
           : null,
         createdBy: lead.createdBy
           ? {
-              id: lead.createdBy.id,
-              name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
-              email: lead.createdBy.email,
-              role: lead.createdBy.role?.name || 'User',
-            }
+            id: lead.createdBy.id,
+            name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
+            email: lead.createdBy.email,
+            role: lead.createdBy.role?.name || 'User',
+          }
           : null,
       },
       summary,
@@ -3485,8 +3680,8 @@ export class LeadsService {
         .join(' ');
       const processedByName = req.processedBy
         ? [req.processedBy.firstName, req.processedBy.lastName]
-            .filter(Boolean)
-            .join(' ')
+          .filter(Boolean)
+          .join(' ')
         : null;
 
       return {
@@ -3509,10 +3704,10 @@ export class LeadsService {
         requestedAt: req.requestedAt,
         processedBy: req.processedBy
           ? {
-              id: req.processedBy.id,
-              name: processedByName,
-              email: req.processedBy.email,
-            }
+            id: req.processedBy.id,
+            name: processedByName,
+            email: req.processedBy.email,
+          }
           : null,
         processedAt: req.processedAt,
         remarks: req.remarks,

@@ -26,6 +26,12 @@ export class TpcController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('users')
+  getEligibleUsers() {
+    return this.tpcService.getSelectableUsers();
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Get('my')
   getMyTpcs(@Req() req: AuthenticatedRequest) {
     return this.tpcService.getMyTpcs(req.user.sub);

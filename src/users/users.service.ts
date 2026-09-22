@@ -18,6 +18,12 @@ import { USER_SAFE_SELECT } from 'src/common/constants/constants.user';
 import { ActivityLogService } from 'src/activity-log/activity-log.service';
 import { ActivityType, UserStatus } from '@prisma/client';
 import { ReplaceSuperAdminDto } from './dto/replace-super-admin.dto';
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
+
+import {
+  processUserTeamTransfer,
+  releaseUserLeadsToPool,
+} from './utils/team-transfer.util';
 
 @Injectable()
 export class UsersService {
@@ -25,7 +31,8 @@ export class UsersService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly activityLogService: ActivityLogService,
-  ) {}
+    private readonly teamLeadAuthService: TeamLeadAuthorizationService,
+  ) { }
 
   // Helper: Get SUPER_ADMIN role record
   private async getSuperAdminRole() {
@@ -56,12 +63,43 @@ export class UsersService {
     return user?.role?.name === 'HR';
   }
 
-  // Get all users
-  async findAll() {
+  // Get all users (scoped for Team Lead)
+  async findAll(callingUser?: { sub: string }) {
+    let whereClause: any = {};
+    if (callingUser?.sub) {
+      const callingUserRecord = await this.prisma.user.findUnique({
+        where: { id: callingUser.sub },
+        select: { role: { select: { name: true } } },
+      });
+      const roleName = (callingUserRecord?.role?.name || '').toUpperCase();
+      const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
+        roleName,
+      );
+
+      if (!isSuperOrHr) {
+        const isTeamLead = await this.teamLeadAuthService.isTeamLead(
+          callingUser.sub,
+        );
+        if (isTeamLead) {
+          const advisorIds =
+            await this.teamLeadAuthService.getTeamLeadAdvisorIds(
+              callingUser.sub,
+            );
+          whereClause = {
+            id: {
+              in: Array.from(new Set([callingUser.sub, ...advisorIds])),
+            },
+          };
+        }
+      }
+    }
+
     return this.prisma.user.findMany({
+      where: whereClause,
       select: USER_SAFE_SELECT,
     });
   }
+
 
   // Generate username
   private async generateUsername(
@@ -123,6 +161,13 @@ export class UsersService {
       throw new NotFoundException(ERROR_MESSAGES.ROLE_NOT_FOUND);
     }
 
+    const roleNameClean = (role.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isTeamLeadRole = roleNameClean === 'TEAM_LEAD' || roleNameClean === 'TEAMLEAD';
+
+    if (isTeamLeadRole && !createUserDto.teamId) {
+      throw new BadRequestException('Team Lead must be assigned to a team.');
+    }
+
     // Super Admin Protection Rules
     const superAdminRole = await this.getSuperAdminRole();
     if (superAdminRole && createUserDto.roleId === superAdminRole.id) {
@@ -166,27 +211,47 @@ export class UsersService {
     // Hash Temporary Password
     const passwordHash = await argon2.hash(temporaryPassword);
 
-    // Create User
-    const newUser = await this.prisma.user.create({
-      data: {
-        firstName: createUserDto.firstName,
-        lastName: createUserDto.lastName,
-        email: createUserDto.email,
-        phone: createUserDto.phone,
-        alternatePhone: createUserDto.alternatePhone,
-        dob: createUserDto.dob ? new Date(createUserDto.dob) : undefined,
-        username,
-        passwordHash,
-        roleId: createUserDto.roleId,
-        teamId: createUserDto.teamId,
-      },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roleId: true,
-      },
+    // Create User & TeamLead in Transaction
+    const newUser = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.user.create({
+        data: {
+          firstName: createUserDto.firstName,
+          lastName: createUserDto.lastName,
+          email: createUserDto.email,
+          phone: createUserDto.phone,
+          alternatePhone: createUserDto.alternatePhone,
+          dob: createUserDto.dob ? new Date(createUserDto.dob) : undefined,
+          username,
+          passwordHash,
+          roleId: createUserDto.roleId,
+          teamId: createUserDto.teamId,
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          roleId: true,
+        },
+      });
+
+      if (isTeamLeadRole && createUserDto.teamId) {
+        await tx.teamLead.upsert({
+          where: {
+            teamId_userId: {
+              teamId: createUserDto.teamId,
+              userId: u.id,
+            },
+          },
+          create: {
+            teamId: createUserDto.teamId,
+            userId: u.id,
+          },
+          update: {},
+        });
+      }
+
+      return u;
     });
 
     const temporaryToken = await this.jwtService.signAsync(
@@ -212,8 +277,37 @@ export class UsersService {
     };
   }
 
-  // Find by ID
-  async findOne(id: string) {
+  // Find by ID with authorization check
+  async findOne(id: string, callingUser?: { sub: string }) {
+    if (callingUser?.sub && callingUser.sub !== id) {
+      const callingUserRecord = await this.prisma.user.findUnique({
+        where: { id: callingUser.sub },
+        select: { role: { select: { name: true } } },
+      });
+      const roleName = (callingUserRecord?.role?.name || '').toUpperCase();
+      const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
+        roleName,
+      );
+
+      if (!isSuperOrHr) {
+        const isTeamLead = await this.teamLeadAuthService.isTeamLead(
+          callingUser.sub,
+        );
+        if (isTeamLead) {
+          const isAdvisor =
+            await this.teamLeadAuthService.canTeamLeadAccessAdvisor(
+              callingUser.sub,
+              id,
+            );
+          if (!isAdvisor) {
+            throw new ForbiddenException(
+              'Access denied: You cannot view this user profile.',
+            );
+          }
+        }
+      }
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id },
       select: USER_SAFE_SELECT,
@@ -417,21 +511,30 @@ export class UsersService {
       }
     }
 
-    const updatedUser = await this.prisma.user.update({
-      where: { id },
-      data: {
-        firstName: updateUserDto.firstName,
-        lastName: updateUserDto.lastName,
-        email: updateUserDto.email,
-        phone: updateUserDto.phone,
-        alternatePhone: updateUserDto.alternatePhone,
-        dob: updateUserDto.dob ? new Date(updateUserDto.dob) : undefined,
-        roleId: updateUserDto.roleId,
-        teamId: updateUserDto.teamId,
-        managerId: updateUserDto.managerId,
-      },
-      select: USER_SAFE_SELECT,
-    });
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      if (
+        updateUserDto.teamId !== undefined &&
+        updateUserDto.teamId !== user.teamId
+      ) {
+        await processUserTeamTransfer(tx, id, updateUserDto.teamId);
+      }
+
+      return tx.user.update({
+        where: { id },
+        data: {
+          firstName: updateUserDto.firstName,
+          lastName: updateUserDto.lastName,
+          email: updateUserDto.email,
+          phone: updateUserDto.phone,
+          alternatePhone: updateUserDto.alternatePhone,
+          dob: updateUserDto.dob ? new Date(updateUserDto.dob) : undefined,
+          roleId: updateUserDto.roleId,
+          teamId: updateUserDto.teamId,
+          managerId: updateUserDto.managerId,
+        },
+        select: USER_SAFE_SELECT,
+      });
+    }, { maxWait: 10000, timeout: 30000 });
 
     if (currentUserId) {
       const userName =
@@ -505,11 +608,14 @@ export class UsersService {
       targetTeamName = team.name;
     }
 
-    const updatedUser = await this.prisma.user.update({
-      where: { id },
-      data: { teamId },
-      select: USER_SAFE_SELECT,
-    });
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      await processUserTeamTransfer(tx, id, teamId);
+
+      return tx.user.findUnique({
+        where: { id },
+        select: USER_SAFE_SELECT,
+      });
+    }, { maxWait: 10000, timeout: 30000 });
 
     if (currentUserId && existingUser.teamId !== teamId) {
       const userName =
@@ -568,11 +674,17 @@ export class UsersService {
       }
     }
 
-    const updatedUser = await this.prisma.user.update({
-      where: { id },
-      data: { status },
-      select: USER_SAFE_SELECT,
-    });
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      if (user.status === UserStatus.ACTIVE && status !== UserStatus.ACTIVE) {
+        await releaseUserLeadsToPool(tx, id);
+      }
+
+      return tx.user.update({
+        where: { id },
+        data: { status },
+        select: USER_SAFE_SELECT,
+      });
+    }, { maxWait: 10000, timeout: 30000 });
 
     if (currentUserId) {
       let description =

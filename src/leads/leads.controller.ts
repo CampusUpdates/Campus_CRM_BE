@@ -72,12 +72,15 @@ export class LeadsController {
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('LEAD_SEARCH')
   @Get('search')
-  searchByPhone(@Query('phone') phone: string) {
-    return this.leadsService.searchByPhone(phone);
+  searchByPhone(
+    @Query('phone') phone: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.leadsService.searchByPhone(phone, req.user);
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
-  @RequirePermission('LEAD_UPDATE')
+  @RequirePermission('LEAD_ASSIGN')
   @Post('bulk-assign')
   assignBulkLeads(
     @Body() bulkAssignDto: BulkAssignLeadDto,
@@ -194,7 +197,7 @@ export class LeadsController {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
-  @RequirePermission('LEAD_UPDATE')
+  @RequirePermission('LEAD_ASSIGN')
   @Post(':id/assign')
   assignLead(
     @Param('id') id: string,

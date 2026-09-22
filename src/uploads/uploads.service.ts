@@ -841,6 +841,114 @@ export class UploadsService {
     };
   }
 
+  async findAssignmentDetails(assignmentId: string) {
+    const assignment = await this.prisma.dataAssignment.findUnique({
+      where: { id: assignmentId },
+      include: {
+        assignedTo: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            username: true,
+            role: { select: { id: true, name: true } },
+            team: { select: { id: true, name: true } },
+          },
+        },
+        assignedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            username: true,
+          },
+        },
+        items: {
+          include: {
+            studentData: {
+              include: {
+                callRecords: {
+                  orderBy: [
+                    { startedAt: 'desc' },
+                    { createdAt: 'desc' },
+                  ],
+                  take: 1,
+                  include: {
+                    createdBy: {
+                      select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!assignment) {
+      throw new NotFoundException(
+        `Data assignment with ID "${assignmentId}" not found`,
+      );
+    }
+
+    return {
+      id: assignment.id,
+      assignedToId: assignment.assignedToId,
+      assignedById: assignment.assignedById,
+      assignedAt: assignment.assignedAt,
+      expiresAt: assignment.expiresAt,
+      status: assignment.status,
+      reclaimedAt: assignment.reclaimedAt,
+      assignedTo: assignment.assignedTo,
+      assignedBy: assignment.assignedBy,
+      totalRecords: assignment.items.length,
+      items: assignment.items.map((item) => {
+        const student = item.studentData;
+        const latestCall = student.callRecords[0] || null;
+
+        return {
+          id: item.id,
+          studentDataId: student.id,
+          firstName: student.firstName,
+          middleName: student.middleName,
+          lastName: student.lastName,
+          phone: student.phone,
+          email: student.email,
+          city: student.city,
+          state: student.state,
+          createdAt: student.createdAt,
+          recentCall: latestCall
+            ? {
+                id: latestCall.id,
+                outcome: latestCall.outcome,
+                notes: latestCall.notes,
+                startedAt: latestCall.startedAt,
+                endedAt: latestCall.endedAt,
+                durationSeconds: latestCall.durationSeconds,
+                createdAt: latestCall.createdAt,
+                createdBy: latestCall.createdBy
+                  ? {
+                      id: latestCall.createdBy.id,
+                      firstName: latestCall.createdBy.firstName,
+                      lastName: latestCall.createdBy.lastName,
+                      email: latestCall.createdBy.email,
+                    }
+                  : null,
+              }
+            : null,
+        };
+      }),
+    };
+  }
+
   async reclaimAdvisorData(
     advisorId: string,
     managerId: string,

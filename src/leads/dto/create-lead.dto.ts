@@ -99,4 +99,8 @@ export class CreateLeadDto {
   @IsOptional()
   @IsInt()
   statusId?: number;
+
+  @IsOptional()
+  @IsInt()
+  teamId?: number;
 }

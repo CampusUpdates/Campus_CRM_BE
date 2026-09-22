@@ -1,10 +1,23 @@
+import { Type } from 'class-transformer';
 import {
   IsArray,
   IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
+  ValidateNested,
 } from 'class-validator';
+
+export class TeamLeadAdvisorAssignmentDto {
+  @IsString()
+  @IsNotEmpty()
+  @IsUUID()
+  teamLeadId!: string;
+
+  @IsArray()
+  @IsUUID('all', { each: true })
+  advisorIds!: string[];
+}
 
 export class CreateTeamDto {
   @IsString()
@@ -23,4 +36,15 @@ export class CreateTeamDto {
   @IsArray()
   @IsUUID('all', { each: true })
   memberIds!: string[];
+
+  @IsArray()
+  @IsOptional()
+  @IsUUID('all', { each: true })
+  teamLeadIds?: string[];
+
+  @IsArray()
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => TeamLeadAdvisorAssignmentDto)
+  teamLeadAdvisorAssignments?: TeamLeadAdvisorAssignmentDto[];
 }

@@ -17,22 +17,48 @@ import { Permissions } from 'src/permissions/permissions.decorator';
 import { AttendancePolicyDto } from './dto/attendance-policy.dto';
 import { HolidayDto } from './dto/holiday.dto';
 
+import { Req } from '@nestjs/common';
+import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
+
 @Controller('attendance')
 @UseGuards(JwtAuthGuard)
 export class AttendanceController {
   constructor(private readonly attendanceService: AttendanceService) {}
 
+  @UseGuards(PermissionsGuard)
+  @Permissions('ATTENDANCE_MANAGE')
   @Get()
   getAttendanceRecords(
     @Query('date') date?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('userId') userId?: string,
+    @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('teamId') teamId?: string,
+    @Query('roleId') roleId?: string,
+    @Query('role') role?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     return this.attendanceService.getAttendanceRecords({
       date,
+      startDate,
+      endDate,
+      userId,
+      search,
       status,
       teamId,
+      roleId,
+      role,
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
     });
+  }
+
+  @Post('check-out')
+  checkOut(@Req() req: AuthenticatedRequest) {
+    return this.attendanceService.checkOut(req.user.sub);
   }
 
   // --- Policy Endpoints ---

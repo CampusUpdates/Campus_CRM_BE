@@ -1,4 +1,4 @@
-import { Body, Controller, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, Req, UseGuards } from '@nestjs/common';
 
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -8,7 +8,12 @@ import type { AuthenticatedRequest } from './interfaces/authenticated-request.in
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService) { }
+
+  @Get('location-status')
+  getLocationStatus() {
+    return this.authService.getLocationStatus();
+  }
 
   @Post('login')
   login(@Body() loginDto: LoginDto) {

@@ -78,6 +78,10 @@ export class UpdateLeadPipelineDto {
 
   @IsOptional()
   @IsString()
+  leadCollegeId?: string;
+
+  @IsOptional()
+  @IsString()
   applicationId?: string;
 
   @IsOptional()

@@ -8,6 +8,7 @@ import {
 import { LeadsService } from './leads.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { TeamLeadAuthorizationService } from '../teams/team-lead-authorization.service';
 import {
   ClaimRequestStatus,
   LeadSource,
@@ -204,6 +205,17 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
         {
           provide: NotificationsService,
           useValue: { createNotification: jest.fn() },
+        },
+        {
+          provide: TeamLeadAuthorizationService,
+          useValue: {
+            isTeamLead: jest.fn().mockResolvedValue(false),
+            getTeamLeadAdvisorIds: jest.fn().mockResolvedValue([]),
+            getTeamLeadAssignedTeamIds: jest.fn().mockResolvedValue([]),
+            canTeamLeadAccessTeam: jest.fn().mockResolvedValue(false),
+            canTeamLeadAccessAdvisor: jest.fn().mockResolvedValue(false),
+            canTeamLeadAccessLead: jest.fn().mockResolvedValue(false),
+          },
         },
       ],
     }).compile();

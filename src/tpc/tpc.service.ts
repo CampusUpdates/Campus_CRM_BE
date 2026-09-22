@@ -3,13 +3,34 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationsService } from 'src/notifications/notifications.service';
 import { AssignTpcDto } from './dto/assign-tpc.dto';
 import { UpdateTpcStatusDto } from './dto/update-tpc-status.dto';
+import { USER_SAFE_SELECT } from 'src/common/constants/constants.user';
+import { UserStatus } from '@prisma/client';
 
 @Injectable()
 export class TpcService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
-  ) {}
+  ) { }
+
+  async getSelectableUsers() {
+    return this.prisma.user.findMany({
+      where: {
+        status: UserStatus.ACTIVE,
+        role: {
+          name: {
+            not: 'HR',
+          },
+        },
+      },
+      select: USER_SAFE_SELECT,
+      orderBy: [
+        { firstName: 'asc' },
+        { lastName: 'asc' },
+      ],
+    });
+  }
+
 
   async assignTpc(dto: AssignTpcDto, assignedById: string) {
     const lead = await this.prisma.lead.findUnique({
@@ -139,6 +160,11 @@ export class TpcService {
             lead: {
               include: {
                 status: true,
+                collegeApplications: {
+                  include: {
+                    college: true,
+                  },
+                },
               },
             },
           },
@@ -184,6 +210,11 @@ export class TpcService {
             lead: {
               include: {
                 status: true,
+                collegeApplications: {
+                  include: {
+                    college: true,
+                  },
+                },
               },
             },
           },
@@ -233,21 +264,21 @@ export class TpcService {
       where: isGlobalAccess
         ? {}
         : {
-            OR: [
-              {
-                assignments: {
-                  some: {
-                    OR: [{ assignedToId: userId }, { assignedById: userId }],
-                  },
+          OR: [
+            {
+              assignments: {
+                some: {
+                  OR: [{ assignedToId: userId }, { assignedById: userId }],
                 },
               },
-              {
-                lead: {
-                  createdById: userId,
-                },
+            },
+            {
+              lead: {
+                createdById: userId,
               },
-            ],
-          },
+            },
+          ],
+        },
       include: {
         lead: {
           include: {
@@ -310,7 +341,16 @@ export class TpcService {
     const tpc = await this.prisma.tPC.findFirst({
       where: { leadId },
       include: {
-        lead: true,
+        lead: {
+          include: {
+            status: true,
+            collegeApplications: {
+              include: {
+                college: true,
+              },
+            },
+          },
+        },
         assignments: {
           include: {
             assignedBy: {
@@ -378,6 +418,11 @@ export class TpcService {
             lead: {
               include: {
                 status: true,
+                collegeApplications: {
+                  include: {
+                    college: true,
+                  },
+                },
               },
             },
           },

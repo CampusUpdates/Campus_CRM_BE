@@ -9,6 +9,7 @@ async function main() {
     { name: 'Program Advisor', description: 'Program Advisor managing individual leads', displayOrder: 2 },
     { name: 'Manager', description: 'Team Manager overseeing advisors and leads', displayOrder: 3 },
     { name: 'HR', description: 'Human Resources managing employees, attendance, and recruitment', displayOrder: 4 },
+    { name: 'Team Lead', description: 'Team Lead supervising Program Advisors and managing team-wide lead operations', displayOrder: 5 },
   ];
 
   const rolesMap = new Map<string, number>();
@@ -42,6 +43,7 @@ async function main() {
     { name: 'BYPASS_OFFICE_VALIDATION', description: 'Bypass physical office location validation on login' },
     { name: 'MANAGE_ATTENDANCE_POLICY', description: 'Manage attendance policy rules' },
     { name: 'MANAGE_HOLIDAYS', description: 'Manage HR holidays' },
+    { name: 'OFFICE_MANAGE', description: 'Manage office locations and geofence configuration' },
   ];
 
   const permissionsMap = new Map<string, number>();
@@ -76,6 +78,14 @@ async function main() {
     { roleName: 'Manager', permName: 'REPORT_TEAM_VIEW', scope: PermissionScope.TEAM },
     { roleName: 'Manager', permName: 'TEAM_MANAGE', scope: PermissionScope.ALL },
 
+    // Team Lead
+    { roleName: 'Team Lead', permName: 'LEAD_VIEW', scope: PermissionScope.TEAM },
+    { roleName: 'Team Lead', permName: 'LEAD_CREATE', scope: PermissionScope.ALL },
+    { roleName: 'Team Lead', permName: 'LEAD_UPDATE', scope: PermissionScope.TEAM },
+    { roleName: 'Team Lead', permName: 'LEAD_CLAIM', scope: PermissionScope.ALL },
+    { roleName: 'Team Lead', permName: 'LEAD_SEARCH', scope: PermissionScope.TEAM },
+    { roleName: 'Team Lead', permName: 'COLLEGE_LEAD_APPROVE', scope: PermissionScope.TEAM },
+
     // HR
     { roleName: 'HR', permName: 'USER_MANAGE', scope: PermissionScope.ALL },
     { roleName: 'HR', permName: 'ATTENDANCE_MANAGE', scope: PermissionScope.ALL },
@@ -93,6 +103,18 @@ async function main() {
       scope: PermissionScope.ALL,
     })),
   ];
+
+  // Clean up any removed role permissions (e.g. REPORT_TEAM_VIEW for Team Lead)
+  const teamLeadRoleId = rolesMap.get('Team Lead');
+  const reportTeamPermId = permissionsMap.get('REPORT_TEAM_VIEW');
+  if (teamLeadRoleId && reportTeamPermId) {
+    await prisma.rolePermission.deleteMany({
+      where: {
+        roleId: teamLeadRoleId,
+        permissionId: reportTeamPermId,
+      },
+    });
+  }
 
   for (const rp of rolePermissions) {
     const roleId = rolesMap.get(rp.roleName);
