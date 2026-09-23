@@ -1417,15 +1417,43 @@ export class DashboardService {
   }
 
   // System-wide Super Admin Dashboard Aggregation using real DB relationships
-  async getSuperAdminDashboardStats(userId?: string) {
+  async getSuperAdminDashboardStats(
+    userId?: string,
+    startDateStr?: string,
+    endDateStr?: string,
+  ) {
     await this.verifyUserRole(userId, ['SUPER_ADMIN']);
 
     const startOfToday = new Date();
-
     startOfToday.setHours(0, 0, 0, 0);
 
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
+
+    let dateFilter: { gte?: Date; lte?: Date } | undefined = {
+      gte: startOfToday,
+      lte: endOfToday,
+    };
+
+    if (startDateStr === 'all' || startDateStr === 'ALL') {
+      dateFilter = undefined;
+    } else if (startDateStr || endDateStr) {
+      dateFilter = {};
+      if (startDateStr) {
+        const s = new Date(startDateStr);
+        if (!isNaN(s.getTime())) {
+          s.setHours(0, 0, 0, 0);
+          dateFilter.gte = s;
+        }
+      }
+      if (endDateStr) {
+        const e = new Date(endDateStr);
+        if (!isNaN(e.getTime())) {
+          e.setHours(23, 59, 59, 999);
+          dateFilter.lte = e;
+        }
+      }
+    }
 
     const [
       allTeams,
@@ -1479,8 +1507,10 @@ export class DashboardService {
             { role: { name: { contains: 'Lead', mode: 'insensitive' } } },
             { assignedDataAssignments: { some: { status: 'ACTIVE' } } },
             { callRecordsCreated: { some: {} } },
+            { createdInteractions: { some: {} } },
           ],
         },
+
         include: {
           team: {
             select: {
@@ -1496,11 +1526,9 @@ export class DashboardService {
         orderBy: { firstName: 'asc' },
       }),
 
-      // 3. Leads created today
+      // 3. Leads created
       this.prisma.lead.findMany({
-        where: {
-          createdAt: { gte: startOfToday, lte: endOfToday },
-        },
+        where: dateFilter ? { createdAt: dateFilter } : {},
         include: {
           status: true,
           createdBy: {
@@ -1533,11 +1561,9 @@ export class DashboardService {
         orderBy: { createdAt: 'desc' },
       }),
 
-      // 4. Interactions logged today
+      // 4. Interactions logged
       this.prisma.interaction.findMany({
-        where: {
-          createdAt: { gte: startOfToday, lte: endOfToday },
-        },
+        where: dateFilter ? { createdAt: dateFilter } : {},
         include: {
           createdBy: {
             select: {
@@ -1874,11 +1900,9 @@ export class DashboardService {
         },
       }),
 
-      // 21. CallRecords logged today
+      // 21. CallRecords logged
       this.prisma.callRecord.findMany({
-        where: {
-          createdAt: { gte: startOfToday, lte: endOfToday },
-        },
+        where: dateFilter ? { createdAt: dateFilter } : {},
         include: {
           studentData: {
             select: {
@@ -2256,10 +2280,25 @@ export class DashboardService {
     });
 
     // Format 8. Program Advisor Performance Table
-    const uniqueAdvisorMap = new Map<string, (typeof allAdvisors)[0]>();
-    for (const adv of allAdvisors) {
+    const uniqueAdvisorMap = new Map<string, { id: string; firstName: string; lastName: string | null; team: { id: number; name: string } | null }>();
+    for (const adv of (allAdvisors as any[])) {
       if (!uniqueAdvisorMap.has(adv.id)) {
-        uniqueAdvisorMap.set(adv.id, adv);
+        uniqueAdvisorMap.set(adv.id, {
+          id: adv.id,
+          firstName: adv.firstName,
+          lastName: adv.lastName,
+          team: adv.team ? { id: adv.team.id, name: adv.team.name } : null,
+        });
+      }
+    }
+    for (const c of callsTodayList) {
+      if (c.advisorId && !uniqueAdvisorMap.has(c.advisorId)) {
+        uniqueAdvisorMap.set(c.advisorId, {
+          id: c.advisorId,
+          firstName: c.advisor.split(' ')[0] || c.advisor,
+          lastName: c.advisor.split(' ').slice(1).join(' ') || null,
+          team: c.teamId ? { id: c.teamId as any, name: c.team } : null,
+        });
       }
     }
     const uniqueAdvisors = Array.from(uniqueAdvisorMap.values());

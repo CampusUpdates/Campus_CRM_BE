@@ -40,9 +40,18 @@ export class DashboardController {
   }
 
   @Get('super-admin')
-  getSuperAdminDashboardStats(@Req() req: AuthenticatedRequest) {
-    return this.dashboardService.getSuperAdminDashboardStats(req.user.sub);
+  getSuperAdminDashboardStats(
+    @Req() req: AuthenticatedRequest,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    return this.dashboardService.getSuperAdminDashboardStats(
+      req.user.sub,
+      startDate,
+      endDate,
+    );
   }
+
 
   @Get('admissions')
   getAdmissionsDashboardStats(
