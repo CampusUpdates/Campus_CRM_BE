@@ -1,0 +1,24 @@
+name: Deploy Campus CRM Backend - Dev
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/campus-crmdev
+            git pull origin dev
+            npm install
+            npm run build
+            pm2 restart campus-crm-dev --update-env
