@@ -5,6 +5,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   Min,
 } from 'class-validator';
@@ -83,4 +84,9 @@ export class UpdateLeadDto {
   @IsArray()
   @IsString({ each: true })
   collegeIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true, message: 'Every negative college ID must be a valid UUID' })
+  negativeCollegeIds?: string[];
 }

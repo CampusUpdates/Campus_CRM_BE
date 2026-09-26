@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -11,6 +12,7 @@ import { CallsService } from './calls.service';
 import { InitiateMockCallDto } from './dto/initiate-mock-call.dto';
 import { EndMockCallDto } from './dto/end-mock-call.dto';
 import { CreateCallOutcomeDto } from './dto/create-call-outcome.dto';
+import { GetCallLogsDto } from './dto/get-call-logs.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from 'src/auth/guards/permissions/permissions.guard';
 import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
@@ -23,6 +25,18 @@ export class CallsController {
   @Get('queue')
   async getCallQueue(@Req() req: AuthenticatedRequest) {
     return this.callsService.getCallQueue(req.user.sub);
+  }
+
+  @Get('logs')
+  async getCallLogs(
+    @Query() dto: GetCallLogsDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.callsService.getCallLogs(
+      dto,
+      req.user.sub,
+      req.user.roleId,
+    );
   }
 
   @Get('student-data/:id')

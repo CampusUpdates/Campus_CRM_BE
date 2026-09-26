@@ -301,7 +301,10 @@ export class DashboardService {
       'SUPER_ADMIN',
     ]);
 
-    const [myLeads, myPitches, myTpcs, allStatuses] = await Promise.all([
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const [myLeads, myPitches, myTpcs, allStatuses, callsTodayCount] = await Promise.all([
       // Own assigned or created leads
       this.prisma.lead.findMany({
         where: {
@@ -360,6 +363,16 @@ export class DashboardService {
       this.prisma.leadStatus.findMany({
         where: { isActive: true },
         orderBy: { displayOrder: 'asc' },
+      }),
+
+      // Calls logged today by this advisor
+      this.prisma.callRecord.count({
+        where: {
+          createdById: userId,
+          createdAt: {
+            gte: startOfDay,
+          },
+        },
       }),
     ]);
 
@@ -454,6 +467,7 @@ export class DashboardService {
       kpis: {
         totalLeads,
         admissionsDone,
+        callsTodayCount,
         inProgressApplications,
         conversionRate,
         pitchesTotal: myPitches.length,
@@ -1421,8 +1435,15 @@ export class DashboardService {
     userId?: string,
     startDateStr?: string,
     endDateStr?: string,
+    pageParam: number = 1,
+    limitParam: number = 10,
+    callTimeParam?: string,
   ) {
     await this.verifyUserRole(userId, ['SUPER_ADMIN']);
+
+    const page = Math.max(1, Number(pageParam) || 1);
+    const limit = Math.min(100, Math.max(1, Number(limitParam) || 10));
+    const skip = (page - 1) * limit;
 
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -1455,6 +1476,43 @@ export class DashboardService {
       }
     }
 
+    let callRecordDateFilter: any = dateFilter ? { createdAt: dateFilter } : {};
+
+    if (callTimeParam && callTimeParam !== 'ALL' && callTimeParam !== 'all') {
+      const match = callTimeParam.match(/^(\d{2}):00-(\d{2}):00$/);
+      if (match) {
+        const startHour = parseInt(match[1], 10);
+        const endHour = parseInt(match[2], 10);
+
+        let baseStart: Date;
+        let baseEnd: Date;
+
+        if (dateFilter?.gte && dateFilter?.lte) {
+          baseStart = new Date(dateFilter.gte);
+          baseEnd = new Date(dateFilter.lte);
+        } else if (dateFilter?.gte) {
+          baseStart = new Date(dateFilter.gte);
+          baseEnd = new Date(dateFilter.gte);
+        } else {
+          baseStart = new Date(startOfToday);
+          baseEnd = new Date(endOfToday);
+        }
+
+        const callStart = new Date(baseStart);
+        callStart.setHours(startHour, 0, 0, 0);
+
+        const callEnd = new Date(baseEnd);
+        callEnd.setHours(endHour, 0, 0, 0);
+
+        callRecordDateFilter = {
+          createdAt: {
+            gte: callStart,
+            lt: callEnd,
+          },
+        };
+      }
+    }
+
     const [
       allTeams,
       allAdvisors,
@@ -1468,6 +1526,7 @@ export class DashboardService {
       totalLeadsCount,
       allLeadsForPipeline,
       availableStudentDataCount,
+      dataUploadedTodayCount,
       expiredDataAssignmentCount,
       activeDataAssignmentCount,
       pendingTpcUsersCount,
@@ -1476,7 +1535,9 @@ export class DashboardService {
       recentActivityLogs,
       activeDataAssignments,
       admissionDoneLeads,
-      todaysCallRecords,
+      allCallRecordsForStats,
+      paginatedCallRecords,
+      callRecordsTotalCount,
     ] = await Promise.all([
       // 1. All active teams with manager and members (users)
       this.prisma.team.findMany({
@@ -1794,6 +1855,11 @@ export class DashboardService {
         where: { assignmentItems: { none: {} } },
       }),
 
+      // 12b. StudentData uploaded today count
+      this.prisma.studentData.count({
+        where: { createdAt: { gte: startOfToday, lte: endOfToday } },
+      }),
+
       // 13. DataAssignment expired count
       this.prisma.dataAssignment.count({
         where: { status: 'EXPIRED' },
@@ -1900,9 +1966,30 @@ export class DashboardService {
         },
       }),
 
-      // 21. CallRecords logged
+      // 21. CallRecords summary for aggregate metrics (no pagination)
       this.prisma.callRecord.findMany({
-        where: dateFilter ? { createdAt: dateFilter } : {},
+        where: callRecordDateFilter,
+        select: {
+          id: true,
+          outcome: true,
+          createdById: true,
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              teamId: true,
+              team: { select: { id: true, name: true } },
+            },
+          },
+        },
+      }),
+
+      // 22. Paginated CallRecords for Recent Call & Interaction Activity Log table
+      this.prisma.callRecord.findMany({
+        where: callRecordDateFilter,
+        skip,
+        take: limit,
         include: {
           studentData: {
             select: {
@@ -1940,6 +2027,11 @@ export class DashboardService {
           },
         },
         orderBy: { createdAt: 'desc' },
+      }),
+
+      // 23. CallRecords total count matching filters
+      this.prisma.callRecord.count({
+        where: callRecordDateFilter,
       }),
     ]);
 
@@ -1979,7 +2071,21 @@ export class DashboardService {
       };
     });
 
-    // Format 2. Calls Today List
+    // Summary list of calls for advisor & team performance calculations (unpaginated aggregate data)
+    const allCallsForStatsList = allCallRecordsForStats.map((c) => {
+      const advTeam = c.createdBy?.team;
+      return {
+        id: c.id,
+        outcome: c.outcome,
+        advisorId: c.createdById,
+        advisor: c.createdBy
+          ? `${c.createdBy.firstName} ${c.createdBy.lastName || ''}`.trim()
+          : 'Advisor',
+        team: advTeam?.name || 'Unassigned',
+        teamId: advTeam?.id || null,
+      };
+    });
+
     const outcomeLabelMap: Record<string, string> = {
       NO_ANSWER: 'No Answer',
       WRONG_NUMBER: 'Wrong Number',
@@ -1987,93 +2093,46 @@ export class DashboardService {
       FOLLOW_UP: 'Follow Up Required',
       CALL_BACK_LATER: 'Call Back Later',
       INTERESTED: 'Interested / Create Lead',
+      DISCONNECTED: 'Disconnected',
     };
 
-    const callsTodayList = [
-      ...todaysCallRecords.map((c) => {
-        const advTeam = c.createdBy?.team;
-        const advManager = advTeam?.manager;
-        const studentName = c.studentData
-          ? [c.studentData.firstName, c.studentData.middleName, c.studentData.lastName].filter(Boolean).join(' ')
-          : c.lead
-            ? `${c.lead.firstName} ${c.lead.lastName || ''}`.trim()
-            : 'Student Contact';
+    // Format 2. Paginated Calls Today Data
+    const callsTodayData = paginatedCallRecords.map((c) => {
+      const advTeam = c.createdBy?.team;
+      const advManager = advTeam?.manager;
+      const studentName = c.studentData
+        ? [c.studentData.firstName, c.studentData.middleName, c.studentData.lastName].filter(Boolean).join(' ')
+        : c.lead
+          ? `${c.lead.firstName} ${c.lead.lastName || ''}`.trim()
+          : 'Student Contact';
 
-        const phone = c.studentData?.phone || c.lead?.phone || 'N/A';
-        const durationStr = c.durationSeconds !== null && c.durationSeconds !== undefined
-          ? `${Math.floor(c.durationSeconds / 60)}m ${c.durationSeconds % 60}s`
-          : 'N/A';
+      const phone = c.studentData?.phone || c.lead?.phone || 'N/A';
+      const durationStr = c.durationSeconds !== null && c.durationSeconds !== undefined
+        ? `${Math.floor(c.durationSeconds / 60)}m ${c.durationSeconds % 60}s`
+        : 'N/A';
 
-        return {
-          id: c.id,
-          student: studentName,
-          leadId: c.leadId || null,
-          studentDataId: c.studentDataId || null,
-          phone,
-          advisor: c.createdBy
-            ? `${c.createdBy.firstName} ${c.createdBy.lastName || ''}`.trim()
-            : 'Advisor',
-          advisorId: c.createdById,
-          team: advTeam?.name || 'Unassigned',
-          teamId: advTeam?.id || null,
-          manager: advManager
-            ? `${advManager.firstName} ${advManager.lastName || ''}`.trim()
-            : 'Unassigned',
-          callTime: (c.startedAt || c.createdAt).toISOString(),
-          duration: durationStr,
-          callOutcome: outcomeLabelMap[c.outcome] || c.outcome,
-          leadStatus: c.lead?.status?.name || 'PROSPECT',
-          notes: c.notes || null,
-        };
-      }),
-      ...todaysInteractions.map((i) => {
-        const advTeam = i.createdBy.team;
-        const advManager = advTeam?.manager;
-        return {
-          id: i.id,
-          student: `${i.lead.firstName} ${i.lead.lastName || ''}`.trim(),
-          leadId: i.lead.id,
-          studentDataId: null,
-          phone: i.lead.phone,
-          advisor:
-            `${i.createdBy.firstName} ${i.createdBy.lastName || ''}`.trim(),
-          advisorId: i.createdById,
-          team: advTeam?.name || 'Unassigned',
-          teamId: advTeam?.id || null,
-          manager: advManager
-            ? `${advManager.firstName} ${advManager.lastName || ''}`.trim()
-            : 'Unassigned',
-          callTime: i.createdAt.toISOString(),
-          duration: 'Not Available',
-          callOutcome: i.title || i.description.slice(0, 40) || 'Logged Call',
-          leadStatus: i.lead.status?.name || 'LEAD',
-          notes: i.description || null,
-        };
-      }),
-      ...todaysTpcUsers.map((t) => ({
-        id: t.id,
-        student: t.tpc?.lead
-          ? `${t.tpc.lead.firstName} ${t.tpc.lead.lastName || ''}`.trim()
-          : 'Lead',
-        leadId: t.tpc?.lead?.id || null,
-        studentDataId: null,
-        phone: t.tpc?.lead?.phone || 'Not Available',
-        advisor: t.assignedTo
-          ? `${t.assignedTo.firstName} ${t.assignedTo.lastName || ''}`.trim()
+      return {
+        id: c.id,
+        student: studentName,
+        leadId: c.leadId || null,
+        studentDataId: c.studentDataId || null,
+        phone,
+        advisor: c.createdBy
+          ? `${c.createdBy.firstName} ${c.createdBy.lastName || ''}`.trim()
           : 'Advisor',
-        advisorId: t.assignedToId,
-        team: t.assignedTo?.team?.name || 'Unassigned',
-        teamId: t.assignedTo?.team?.id || null,
-        manager: 'Unassigned',
-        callTime: t.createdAt.toISOString(),
-        duration: 'Not Available',
-        callOutcome: `TPC: ${t.status}`,
-        leadStatus: 'TPC',
-        notes: null,
-      })),
-    ].sort(
-      (a, b) => new Date(b.callTime).getTime() - new Date(a.callTime).getTime(),
-    );
+        advisorId: c.createdById,
+        team: advTeam?.name || 'Unassigned',
+        teamId: advTeam?.id || null,
+        manager: advManager
+          ? `${advManager.firstName} ${advManager.lastName || ''}`.trim()
+          : 'Unassigned',
+        callTime: (c.startedAt || c.createdAt).toISOString(),
+        duration: durationStr,
+        callOutcome: outcomeLabelMap[c.outcome] || c.outcome,
+        leadStatus: c.lead?.status?.name || 'PROSPECT',
+        notes: c.notes || null,
+      };
+    });
 
     // Format 3. Attendance Today List
     const attendanceUserIds = new Set(todayAttendances.map((a) => a.userId));
@@ -2151,6 +2210,7 @@ export class DashboardService {
           ? `${lead.firstName} ${lead.lastName || ''}`.trim()
           : 'Student Lead',
         candidateId: lead?.id || i.id,
+        phone: lead?.phone || 'Not Available',
         interviewTime: i.scheduledAt.toISOString(),
         college: i.leadCollege?.college?.name || 'Not Available',
         course:
@@ -2247,7 +2307,7 @@ export class DashboardService {
           (l.assignedAdvisorId && memberIds.includes(l.assignedAdvisorId)),
       ).length;
 
-      const teamCallsTodayCount = callsTodayList.filter(
+      const teamCallsTodayCount = allCallsForStatsList.filter(
         (c) =>
           c.teamId === team.id ||
           (c.advisorId && memberIds.includes(c.advisorId)),
@@ -2291,7 +2351,7 @@ export class DashboardService {
         });
       }
     }
-    for (const c of callsTodayList) {
+    for (const c of allCallsForStatsList) {
       if (c.advisorId && !uniqueAdvisorMap.has(c.advisorId)) {
         uniqueAdvisorMap.set(c.advisorId, {
           id: c.advisorId,
@@ -2322,14 +2382,37 @@ export class DashboardService {
     const advisorPerformance = uniqueAdvisors.map((adv) => {
       const advName = `${adv.firstName} ${adv.lastName || ''}`.trim();
 
-      const advCallsToday = callsTodayList.filter(
+      const advCalls = allCallsForStatsList.filter(
         (c) => c.advisorId === adv.id,
-      ).length;
+      );
+      const advCallsToday = advCalls.length;
+
+      let advAnsweredCalls = 0;
+      let advNotAnsweredCalls = 0;
+
+      for (const c of advCalls) {
+        const outcomeStr = String(c.outcome || '').toUpperCase();
+        if (
+          outcomeStr === 'NOT_INTERESTED' ||
+          outcomeStr === 'FOLLOW_UP' ||
+          outcomeStr === 'CALL_BACK_LATER' ||
+          outcomeStr === 'INTERESTED' ||
+          outcomeStr === 'FOLLOW_UP_REQUIRED'
+        ) {
+          advAnsweredCalls++;
+        } else if (
+          outcomeStr === 'NO_ANSWER' ||
+          outcomeStr === 'WRONG_NUMBER' ||
+          outcomeStr === 'DISCONNECTED'
+        ) {
+          advNotAnsweredCalls++;
+        }
+      }
+
       const advLeadsCreated = leadsTodayList.filter(
         (l) => l.createdById === adv.id || l.assignedAdvisorId === adv.id,
       ).length;
       const advAssignedData = assignedDataMap.get(adv.id) || 0;
-      const advAdmissions = advisorAdmissionsMap.get(adv.id) || 0;
 
       return {
         userId: adv.id,
@@ -2338,8 +2421,9 @@ export class DashboardService {
         teamId: adv.team?.id || null,
         assignedDataCount: advAssignedData,
         callsCount: advCallsToday,
+        answeredCallsCount: advAnsweredCalls,
+        notAnsweredCallsCount: advNotAnsweredCalls,
         leadsCount: advLeadsCreated,
-        admissionsCount: advAdmissions,
       };
     });
 
@@ -2363,10 +2447,12 @@ export class DashboardService {
       (a) => a.callsCount === 0,
     );
 
+    const totalCallPages = Math.ceil(callRecordsTotalCount / limit) || 1;
+
     return {
       kpis: {
         leadsTodayCount: leadsTodayList.length,
-        callsTodayCount: callsTodayList.length,
+        callsTodayCount: callRecordsTotalCount,
         attendanceTotal: attendanceList.length,
         attendancePresent: presentCount,
         attendanceAbsent: absentCount,
@@ -2378,11 +2464,20 @@ export class DashboardService {
         selectionLettersTodayCount: lettersOutList.length,
         admissionsDueTodayCount: admissionsDueList.length,
         availableDataCount: availableStudentDataCount,
+        dataUploadedTodayCount,
         expiredDataCount: expiredDataAssignmentCount,
         activeAssignmentsCount: activeDataAssignmentCount,
       },
       leadsTodayList,
-      callsTodayList,
+      callsTodayList: {
+        data: callsTodayData,
+        pagination: {
+          page,
+          limit,
+          total: callRecordsTotalCount,
+          totalPages: totalCallPages,
+        },
+      },
       attendanceList,
       interviewsList,
       lettersOutList,

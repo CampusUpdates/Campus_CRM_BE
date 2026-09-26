@@ -186,6 +186,7 @@ model College {
   courses            Course[]
   finalEnrolledLeads Lead[]              @relation("FinalCollege")
   leadApplications   LeadCollege[]
+  negativeLeadColleges LeadNegativeCollege[]
 
   @@index([approvedById])
 }
@@ -239,6 +240,7 @@ model Lead {
   assignments              LeadAssignment[]
   claimRequests            LeadClaimRequest[]
   collegeApplications      LeadCollege[]
+  negativeColleges         LeadNegativeCollege[]
   ownershipHistories       LeadOwnershipHistory[]
   tpcs                     TPC[]
   callRecords              CallRecord[]
@@ -297,6 +299,21 @@ model LeadCollege {
   @@index([pitchedById])
   @@index([processedById])
   @@index([applicationId])
+}
+
+model LeadNegativeCollege {
+  id        String   @id @default(uuid()) @db.Uuid
+  leadId    String   @db.Uuid
+  collegeId String   @db.Uuid
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead    Lead    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  college College @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+
+  @@unique([leadId, collegeId])
+  @@index([leadId])
+  @@index([collegeId])
 }
 
 model Interaction {
@@ -887,6 +904,8 @@ enum CallOutcome {
   FOLLOW_UP
   CALL_BACK_LATER
   INTERESTED
+  DISCONNECTED
+  DROP
 }
 
 model CallRecord {

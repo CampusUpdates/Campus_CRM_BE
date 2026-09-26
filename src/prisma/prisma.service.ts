@@ -79,12 +79,14 @@ export class PrismaService
                     errMsg.includes('EngineTerminatedError'));
 
                 if (isTransient && attempts < maxAttempts) {
-                  console.warn(
-                    `[PrismaService] Transient DB connection pool glitch (${errCode || 'pool'}, attempt ${attempts}/${maxAttempts}). Retrying in backoff...`,
-                  );
-                  const jitter = Math.floor(Math.random() * 200);
+                  if (attempts >= 6) {
+                    console.warn(
+                      `[PrismaService] Transient DB connection pool glitch (${errCode || 'pool'}, attempt ${attempts}/${maxAttempts}). Retrying in backoff...`,
+                    );
+                  }
+                  const jitter = Math.floor(Math.random() * 150);
                   await new Promise((res) =>
-                    setTimeout(res, 300 * attempts + jitter),
+                    setTimeout(res, 200 * attempts + jitter),
                   );
                 } else {
                   throw err;

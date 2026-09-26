@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { DataAssignmentStatus } from '@prisma/client';
+import { DataAssignmentStatus, DataUploadStatus, Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import {
   CreateDataAssignmentDto,
@@ -17,6 +17,7 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 import * as XLSX from 'xlsx';
+import type { Response } from 'express';
 
 function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -387,6 +388,163 @@ export class UploadsService {
     };
   }
 
+  async getDatasetCallers(uploadId: string) {
+    try {
+      const callers: Array<{ id: string; firstName: string; lastName: string | null }> =
+        await this.prisma.$queryRaw`
+          SELECT DISTINCT u."id", u."firstName", u."lastName"
+          FROM "CallRecord" c
+          JOIN "StudentData" s ON s."id" = c."studentDataId"
+          JOIN "User" u ON u."id" = c."createdById"
+          WHERE s."uploadId" = ${uploadId}::uuid
+          ORDER BY u."firstName" ASC
+        `;
+      return callers.map((u) => ({
+        id: u.id,
+        name: `${u.firstName} ${u.lastName || ''}`.trim(),
+      }));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  private async applyCallDispositionAndCallerFilter(
+    filterDto: FilterStudentDataDto,
+    baseConditions: any[],
+  ) {
+    let targetDispositions: string[] = [];
+    if (filterDto.dispositions && filterDto.dispositions.length > 0) {
+      targetDispositions = filterDto.dispositions.filter((d) => d && d !== 'ALL');
+    } else if (filterDto.disposition && filterDto.disposition !== 'ALL') {
+      targetDispositions = [filterDto.disposition];
+    }
+
+    const hasDispFilter = targetDispositions.length > 0;
+    const hasCallerFilter = filterDto.calledById && filterDto.calledById !== 'ALL';
+
+    if (!hasDispFilter && !hasCallerFilter) {
+      return;
+    }
+
+    const includesNoCall =
+      targetDispositions.includes('NO_CALL_YET') ||
+      filterDto.calledById === 'NO_CALLER';
+    const recordedDispositions = targetDispositions.filter(
+      (d) => d !== 'NO_CALL_YET',
+    );
+
+    if (includesNoCall && recordedDispositions.length === 0 && !hasCallerFilter) {
+      baseConditions.push({ callRecords: { none: {} } });
+      return;
+    }
+
+    let matchingStudentIds: { studentDataId: string }[] = [];
+    try {
+      if (
+        recordedDispositions.length > 0 &&
+        hasCallerFilter &&
+        filterDto.calledById !== 'NO_CALLER'
+      ) {
+        if (filterDto.uploadIds && filterDto.uploadIds.length > 0) {
+          matchingStudentIds = await this.prisma.$queryRaw`
+            SELECT c."studentDataId"
+            FROM (
+              SELECT DISTINCT ON ("studentDataId") "studentDataId", "outcome", "createdById"
+              FROM "CallRecord"
+              ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+            ) c
+            JOIN "StudentData" s ON s."id" = c."studentDataId"
+            WHERE s."uploadId"::text IN (${Prisma.join(filterDto.uploadIds)})
+              AND c."outcome"::text IN (${Prisma.join(recordedDispositions)})
+              AND c."createdById" = ${filterDto.calledById}::uuid
+          `;
+        } else {
+          matchingStudentIds = await this.prisma.$queryRaw`
+            SELECT c."studentDataId"
+            FROM (
+              SELECT DISTINCT ON ("studentDataId") "studentDataId", "outcome", "createdById"
+              FROM "CallRecord"
+              ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+            ) c
+            WHERE c."outcome"::text IN (${Prisma.join(recordedDispositions)})
+              AND c."createdById" = ${filterDto.calledById}::uuid
+          `;
+        }
+      } else if (recordedDispositions.length > 0) {
+        if (filterDto.uploadIds && filterDto.uploadIds.length > 0) {
+          matchingStudentIds = await this.prisma.$queryRaw`
+            SELECT c."studentDataId"
+            FROM (
+              SELECT DISTINCT ON ("studentDataId") "studentDataId", "outcome"
+              FROM "CallRecord"
+              ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+            ) c
+            JOIN "StudentData" s ON s."id" = c."studentDataId"
+            WHERE s."uploadId"::text IN (${Prisma.join(filterDto.uploadIds)})
+              AND c."outcome"::text IN (${Prisma.join(recordedDispositions)})
+          `;
+        } else {
+          matchingStudentIds = await this.prisma.$queryRaw`
+            SELECT c."studentDataId"
+            FROM (
+              SELECT DISTINCT ON ("studentDataId") "studentDataId", "outcome"
+              FROM "CallRecord"
+              ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+            ) c
+            WHERE c."outcome"::text IN (${Prisma.join(recordedDispositions)})
+          `;
+        }
+      } else if (hasCallerFilter && filterDto.calledById !== 'NO_CALLER') {
+        if (filterDto.uploadIds && filterDto.uploadIds.length > 0) {
+          matchingStudentIds = await this.prisma.$queryRaw`
+            SELECT c."studentDataId"
+            FROM (
+              SELECT DISTINCT ON ("studentDataId") "studentDataId", "createdById"
+              FROM "CallRecord"
+              ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+            ) c
+            JOIN "StudentData" s ON s."id" = c."studentDataId"
+            WHERE s."uploadId"::text IN (${Prisma.join(filterDto.uploadIds)})
+              AND c."createdById" = ${filterDto.calledById}::uuid
+          `;
+        } else {
+          matchingStudentIds = await this.prisma.$queryRaw`
+            SELECT c."studentDataId"
+            FROM (
+              SELECT DISTINCT ON ("studentDataId") "studentDataId", "createdById"
+              FROM "CallRecord"
+              ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+            ) c
+            WHERE c."createdById" = ${filterDto.calledById}::uuid
+          `;
+        }
+      }
+    } catch (_) {
+      matchingStudentIds = [];
+    }
+
+    const studentIds = matchingStudentIds.map((r) => r.studentDataId);
+
+    if (includesNoCall) {
+      if (studentIds.length > 0) {
+        baseConditions.push({
+          OR: [
+            { callRecords: { none: {} } },
+            { id: { in: studentIds } },
+          ],
+        });
+      } else {
+        baseConditions.push({ callRecords: { none: {} } });
+      }
+    } else {
+      if (studentIds.length > 0) {
+        baseConditions.push({ id: { in: studentIds } });
+      } else {
+        baseConditions.push({ id: '00000000-0000-0000-0000-000000000000' });
+      }
+    }
+  }
+
   async findFilteredStudentData(filterDto: FilterStudentDataDto) {
     const page = Number(filterDto.page) || 1;
     const limit = Number(filterDto.limit) || 50;
@@ -423,6 +581,18 @@ export class UploadsService {
       });
     }
 
+    await this.applyCallDispositionAndCallerFilter(filterDto, baseConditions);
+
+    if (filterDto.notCalledByUserIds && filterDto.notCalledByUserIds.length > 0) {
+      baseConditions.push({
+        callRecords: {
+          none: {
+            createdById: { in: filterDto.notCalledByUserIds },
+          },
+        },
+      });
+    }
+
     const baseWhere = baseConditions.length > 0 ? { AND: baseConditions } : {};
 
     let statusWhere = {};
@@ -454,6 +624,24 @@ export class UploadsService {
         include: {
           upload: {
             select: { id: true, fileName: true, uploadedAt: true },
+          },
+          callRecords: {
+            take: 1,
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              outcome: true,
+              notes: true,
+              createdAt: true,
+              durationSeconds: true,
+              createdBy: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                },
+              },
+            },
           },
           assignmentItems: {
             where: {
@@ -501,6 +689,7 @@ export class UploadsService {
         where: { city: { not: null } },
       }),
       this.prisma.dataUpload.findMany({
+        where: { status: DataUploadStatus.COMPLETED },
         select: { id: true, fileName: true },
         orderBy: { uploadedAt: 'desc' },
       }),
@@ -556,25 +745,38 @@ export class UploadsService {
       }
     }
 
+    const notHrConditions: Prisma.UserWhereInput[] = [
+      { role: { name: { in: ['HR', 'hr', 'Hr'] } } },
+      { roleId: 4 },
+    ];
+
+    const selectFields = {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      username: true,
+      role: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+      team: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    };
+
     if (isSuperAdmin) {
       return this.prisma.user.findMany({
         where: {
           status: 'ACTIVE',
-          role: { name: 'Program Advisor' },
+          NOT: notHrConditions,
         },
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          username: true,
-          team: {
-            select: {
-              id: true,
-              name: true,
-            },
-          },
-        },
+        select: selectFields,
         orderBy: { firstName: 'asc' },
       });
     }
@@ -586,14 +788,10 @@ export class UploadsService {
 
     const managedTeamIds = managedTeams.map((t) => t.id);
 
-    if (managedTeamIds.length === 0) {
-      return [];
-    }
-
     return this.prisma.user.findMany({
       where: {
         status: 'ACTIVE',
-        role: { name: 'Program Advisor' },
+        NOT: notHrConditions,
         OR: [
           ...(managedTeamIds.length > 0
             ? [{ teamId: { in: managedTeamIds } }]
@@ -601,19 +799,7 @@ export class UploadsService {
           { managerId: assignerId },
         ],
       },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        email: true,
-        username: true,
-        team: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-      },
+      select: selectFields,
       orderBy: { firstName: 'asc' },
     });
   }
@@ -639,7 +825,7 @@ export class UploadsService {
 
     if (!targetUser) {
       throw new BadRequestException(
-        'Target user is not an active Program Advisor under your management.',
+        'Target user is not an active user eligible for assignment under your management.',
       );
     }
 
@@ -674,6 +860,18 @@ export class UploadsService {
             { city: { contains: s, mode: 'insensitive' } },
             { state: { contains: s, mode: 'insensitive' } },
           ],
+        });
+      }
+
+      await this.applyCallDispositionAndCallerFilter(filterDto, baseConditions);
+
+      if (filterDto.notCalledByUserIds && filterDto.notCalledByUserIds.length > 0) {
+        baseConditions.push({
+          callRecords: {
+            none: {
+              createdById: { in: filterDto.notCalledByUserIds },
+            },
+          },
         });
       }
 
@@ -789,55 +987,219 @@ export class UploadsService {
     );
   }
 
-  async findAllAssignments(page: number = 1, limit: number = 10) {
+  async findAssigneeSummaryHistory(page: number = 1, limit: number = 10) {
     const p = Math.max(1, Number(page) || 1);
     const l = Math.min(100, Math.max(1, Number(limit) || 10));
-    const skip = (p - 1) * l;
 
-    const [data, total] = await Promise.all([
-      this.prisma.dataAssignment.findMany({
-        skip,
-        take: l,
-        orderBy: { assignedAt: 'desc' },
-        include: {
-          assignedTo: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              username: true,
-              email: true,
-              team: {
-                select: { name: true },
+    const distinctAssignees = await this.prisma.dataAssignment.findMany({
+      distinct: ['assignedToId'],
+      select: {
+        assignedToId: true,
+      },
+    });
+
+    const totalUnique = distinctAssignees.length;
+    const skip = (p - 1) * l;
+    const pagedAssigneeIds = distinctAssignees
+      .slice(skip, skip + l)
+      .map((a) => a.assignedToId);
+
+    if (pagedAssigneeIds.length === 0) {
+      return {
+        data: [],
+        pagination: {
+          page: p,
+          limit: l,
+          total: 0,
+          totalPages: 1,
+        },
+      };
+    }
+
+    const summaryList = await Promise.all(
+      pagedAssigneeIds.map(async (assigneeId) => {
+        const user = await this.prisma.user.findUnique({
+          where: { id: assigneeId },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            role: { select: { name: true } },
+            team: { select: { name: true } },
+          },
+        });
+
+        const assignments = await this.prisma.dataAssignment.findMany({
+          where: { assignedToId: assigneeId },
+          orderBy: { assignedAt: 'desc' },
+          include: {
+            assignedBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+            items: {
+              select: {
+                studentData: {
+                  select: {
+                    upload: { select: { id: true, fileName: true } },
+                  },
+                },
               },
             },
           },
-          assignedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              username: true,
-            },
+        });
+
+        let totalAssignedRecords = 0;
+        let activeRecordsCount = 0;
+        const uploadFileNames = new Set<string>();
+        let earliestAssignedAt: Date | null = null;
+        let latestAssignedAt: Date | null = null;
+
+        for (const a of assignments) {
+          const itemCount = a.items.length;
+          totalAssignedRecords += itemCount;
+          if (a.status === DataAssignmentStatus.ACTIVE) {
+            activeRecordsCount += itemCount;
+          }
+
+          if (!earliestAssignedAt || a.assignedAt < earliestAssignedAt) {
+            earliestAssignedAt = a.assignedAt;
+          }
+          if (!latestAssignedAt || a.assignedAt > latestAssignedAt) {
+            latestAssignedAt = a.assignedAt;
+          }
+
+          for (const item of a.items) {
+            if (item.studentData?.upload?.fileName) {
+              uploadFileNames.add(item.studentData.upload.fileName);
+            }
+          }
+        }
+
+        const firstCall = await this.prisma.callRecord.findFirst({
+          where: { createdById: assigneeId },
+          orderBy: { createdAt: 'asc' },
+          select: { createdAt: true },
+        });
+
+        return {
+          assignee: {
+            id: assigneeId,
+            firstName: user?.firstName || 'Unknown',
+            lastName: user?.lastName || null,
+            fullName: `${user?.firstName || 'Unknown'} ${user?.lastName || ''}`.trim(),
+            email: user?.email || '',
+            roleName: user?.role?.name || 'Program Advisor',
+            teamName: user?.team?.name || null,
           },
-          _count: {
-            select: {
-              items: true,
-            },
-          },
-        },
+          datasetsCount: uploadFileNames.size,
+          datasetsList: Array.from(uploadFileNames),
+          totalAssignedRecords,
+          activeRecordsCount,
+          earliestAssignedAt: earliestAssignedAt ? earliestAssignedAt.toISOString() : null,
+          latestAssignedAt: latestAssignedAt ? latestAssignedAt.toISOString() : null,
+          firstCallMadeAt: firstCall ? firstCall.createdAt.toISOString() : null,
+          activeAssignmentsCount: assignments.filter((a) => a.status === DataAssignmentStatus.ACTIVE).length,
+          totalAssignmentsCount: assignments.length,
+        };
       }),
-      this.prisma.dataAssignment.count(),
-    ]);
+    );
 
     return {
-      data,
+      data: summaryList,
       pagination: {
         page: p,
         limit: l,
-        total,
-        totalPages: Math.ceil(total / l) || 1,
+        total: totalUnique,
+        totalPages: Math.ceil(totalUnique / l) || 1,
       },
+    };
+  }
+
+  async findAllAssignments(page: number = 1, limit: number = 10) {
+    return this.findAssigneeSummaryHistory(page, limit);
+  }
+
+  async findAssigneeAssignmentsDetail(assigneeId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: assigneeId },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        role: { select: { name: true } },
+        team: { select: { name: true } },
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException(`User with ID "${assigneeId}" not found`);
+    }
+
+    const assignments = await this.prisma.dataAssignment.findMany({
+      where: { assignedToId: assigneeId },
+      orderBy: { assignedAt: 'desc' },
+      include: {
+        assignedBy: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+        items: {
+          select: {
+            id: true,
+            studentData: {
+              select: {
+                id: true,
+                upload: { select: { id: true, fileName: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const uploadFileNames = new Set<string>();
+    let totalAssignedRecords = 0;
+
+    const assignmentItems = assignments.map((a) => {
+      const itemCount = a.items.length;
+      totalAssignedRecords += itemCount;
+      const fileName =
+        a.items[0]?.studentData?.upload?.fileName || 'Dataset File';
+
+      for (const item of a.items) {
+        if (item.studentData?.upload?.fileName) {
+          uploadFileNames.add(item.studentData.upload.fileName);
+        }
+      }
+
+      return {
+        id: a.id,
+        fileName,
+        recordsCount: itemCount,
+        assignedAt: a.assignedAt.toISOString(),
+        expiresAt: a.expiresAt.toISOString(),
+        status: a.status,
+        reclaimedAt: a.reclaimedAt ? a.reclaimedAt.toISOString() : null,
+        assignedBy: a.assignedBy
+          ? `${a.assignedBy.firstName} ${a.assignedBy.lastName || ''}`.trim()
+          : 'Super Admin',
+      };
+    });
+
+    return {
+      assignee: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fullName: `${user.firstName} ${user.lastName || ''}`.trim(),
+        email: user.email,
+        roleName: user.role?.name || 'Program Advisor',
+        teamName: user.team?.name || null,
+      },
+      datasetsCount: uploadFileNames.size,
+      totalAssignedRecords,
+      assignments: assignmentItems,
     };
   }
 
@@ -949,21 +1311,147 @@ export class UploadsService {
     };
   }
 
+  private async checkIsSuperAdmin(userId: string, roleId: number): Promise<boolean> {
+    if (roleId === 1) return true;
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: { select: { name: true } } },
+    });
+    return !!user?.role?.name?.toUpperCase().includes('SUPER_ADMIN');
+  }
+
+  async reclaimAssignmentById(
+    assignmentId: string,
+    managerId: string,
+    roleId: number,
+  ) {
+    const assignment = await this.prisma.dataAssignment.findUnique({
+      where: { id: assignmentId },
+      include: {
+        assignedTo: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            teamId: true,
+          },
+        },
+        items: true,
+      },
+    });
+
+    if (!assignment) {
+      throw new NotFoundException('Data assignment record not found.');
+    }
+
+    if (assignment.status === DataAssignmentStatus.RECLAIMED) {
+      throw new BadRequestException('This data assignment has already been reclaimed.');
+    }
+
+    if (assignment.status !== DataAssignmentStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Data assignment is not active (current status: ${assignment.status}).`,
+      );
+    }
+
+    const isSuperAdmin = await this.checkIsSuperAdmin(managerId, roleId);
+
+    if (!isSuperAdmin) {
+      const managedTeams = await this.prisma.team.findMany({
+        where: { managerId },
+        select: { id: true },
+      });
+      const managedTeamIds = managedTeams.map((t) => t.id);
+
+      const isMemberOfManagedTeam =
+        assignment.assignedTo?.teamId &&
+        managedTeamIds.includes(assignment.assignedTo.teamId);
+
+      const isOriginalAssigner = assignment.assignedById === managerId;
+
+      if (!isMemberOfManagedTeam && !isOriginalAssigner) {
+        throw new ForbiddenException(
+          'You can only reclaim data assignments from team members within your managed team scope.',
+        );
+      }
+    }
+
+    const now = new Date();
+    const recordsCount = assignment.items.length;
+    const assigneeName = assignment.assignedTo
+      ? `${assignment.assignedTo.firstName} ${assignment.assignedTo.lastName || ''}`.trim()
+      : 'Assignee';
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.dataAssignment.update({
+        where: { id: assignmentId },
+        data: {
+          status: DataAssignmentStatus.RECLAIMED,
+          reclaimedAt: now,
+        },
+      });
+
+      await tx.activityLog.create({
+        data: {
+          userId: managerId,
+          activity: 'DATA_ASSIGNMENT',
+          entityType: 'DATA_ASSIGNMENT',
+          entityId: assignmentId,
+          description: `Reclaimed assignment ${assignmentId} (${recordsCount} records) from ${assigneeName}`,
+        },
+      });
+
+      const notification = await tx.notification.create({
+        data: {
+          type: 'DATA_ASSIGNMENT',
+          title: 'Student Data Reclaimed',
+          message: `${recordsCount} assigned student data records have been reclaimed by management.`,
+        },
+      });
+
+      await tx.notificationRecipient.create({
+        data: {
+          notificationId: notification.id,
+          userId: assignment.assignedToId,
+          isRead: false,
+        },
+      });
+
+      return {
+        message: `Successfully reclaimed data assignment (${recordsCount} records).`,
+        assignmentId,
+        reclaimedRecordsCount: recordsCount,
+      };
+    });
+  }
+
   async reclaimAdvisorData(
     advisorId: string,
     managerId: string,
     roleId: number,
   ) {
-    const eligibleAdvisors = await this.findEligibleAssignees(
-      managerId,
-      roleId,
-    );
-    const isEligible = eligibleAdvisors.some((a) => a.id === advisorId);
+    const isSuperAdmin = await this.checkIsSuperAdmin(managerId, roleId);
 
-    if (!isEligible) {
-      throw new ForbiddenException(
-        'You can only reclaim data assignments from Program Advisors within your authorized team scope.',
-      );
+    if (!isSuperAdmin) {
+      const managedTeams = await this.prisma.team.findMany({
+        where: { managerId },
+        select: { id: true },
+      });
+      const managedTeamIds = managedTeams.map((t) => t.id);
+
+      const targetUser = await this.prisma.user.findUnique({
+        where: { id: advisorId },
+        select: { teamId: true },
+      });
+
+      const isMemberOfManagedTeam =
+        targetUser?.teamId && managedTeamIds.includes(targetUser.teamId);
+
+      if (!isMemberOfManagedTeam) {
+        throw new ForbiddenException(
+          'You can only reclaim data assignments from team members within your managed team scope.',
+        );
+      }
     }
 
     const activeAssignments = await this.prisma.dataAssignment.findMany({
@@ -978,7 +1466,7 @@ export class UploadsService {
 
     if (activeAssignments.length === 0) {
       return {
-        message: 'No active data assignments found for this Program Advisor.',
+        message: 'No active data assignments found for this advisor.',
         reclaimedAssignmentsCount: 0,
         reclaimedRecordsCount: 0,
         advisorId,
@@ -1010,7 +1498,7 @@ export class UploadsService {
           activity: 'DATA_ASSIGNMENT',
           entityType: 'DATA_ASSIGNMENT',
           entityId: advisorId,
-          description: `Reclaimed ${totalRecordsCount} student data records from Program Advisor ${advisorId}`,
+          description: `Reclaimed ${totalRecordsCount} student data records from advisor ${advisorId}`,
         },
       });
 
@@ -1018,7 +1506,7 @@ export class UploadsService {
         data: {
           type: 'DATA_ASSIGNMENT',
           title: 'Student Data Reclaimed',
-          message: `${totalRecordsCount} assigned student data records have been reclaimed by your manager.`,
+          message: `${totalRecordsCount} assigned student data records have been reclaimed by management.`,
         },
       });
 
@@ -1040,43 +1528,60 @@ export class UploadsService {
   }
 
   async reclaimAllAdvisorData(managerId: string, roleId: number) {
-    const eligibleAdvisors = await this.findEligibleAssignees(
-      managerId,
-      roleId,
-    );
-    const eligibleAdvisorIds = eligibleAdvisors.map((a) => a.id);
+    const isSuperAdmin = await this.checkIsSuperAdmin(managerId, roleId);
 
-    if (eligibleAdvisorIds.length === 0) {
-      return {
-        message: 'No eligible Program Advisors found in your scope.',
-        affectedAdvisorsCount: 0,
-        reclaimedAssignmentsCount: 0,
-        reclaimedRecordsCount: 0,
-      };
+    let activeAssignments;
+
+    if (isSuperAdmin) {
+      activeAssignments = await this.prisma.dataAssignment.findMany({
+        where: {
+          status: DataAssignmentStatus.ACTIVE,
+        },
+        include: {
+          items: true,
+        },
+      });
+    } else {
+      const managedTeams = await this.prisma.team.findMany({
+        where: { managerId },
+        select: { id: true },
+      });
+      const managedTeamIds = managedTeams.map((t) => t.id);
+
+      if (managedTeamIds.length === 0) {
+        return {
+          message: 'No managed teams found in your scope.',
+          affectedAdvisorsCount: 0,
+          reclaimedAssignmentsCount: 0,
+          reclaimedRecordsCount: 0,
+        };
+      }
+
+      activeAssignments = await this.prisma.dataAssignment.findMany({
+        where: {
+          status: DataAssignmentStatus.ACTIVE,
+          assignedTo: {
+            teamId: { in: managedTeamIds },
+          },
+        },
+        include: {
+          items: true,
+        },
+      });
     }
-
-    const activeAssignments = await this.prisma.dataAssignment.findMany({
-      where: {
-        assignedToId: { in: eligibleAdvisorIds },
-        status: DataAssignmentStatus.ACTIVE,
-      },
-      include: {
-        items: true,
-      },
-    });
 
     if (activeAssignments.length === 0) {
       return {
-        message: 'No active data assignments found across your team.',
+        message: 'No active data assignments found to reclaim.',
         affectedAdvisorsCount: 0,
         reclaimedAssignmentsCount: 0,
         reclaimedRecordsCount: 0,
       };
     }
 
-    const affectedAdvisorIds = [
+    const affectedAdvisorIds: string[] = [
       ...new Set(activeAssignments.map((a) => a.assignedToId)),
-    ];
+    ].filter((id): id is string => Boolean(id));
     const assignmentIds = activeAssignments.map((a) => a.id);
     const totalRecordsCount = activeAssignments.reduce(
       (sum, a) => sum + a.items.length,
@@ -1102,7 +1607,7 @@ export class UploadsService {
           activity: 'DATA_ASSIGNMENT',
           entityType: 'DATA_ASSIGNMENT',
           entityId: managerId,
-          description: `Bulk reclaimed ${totalRecordsCount} student data records across ${affectedAdvisorIds.length} Program Advisors.`,
+          description: `Bulk reclaimed ${totalRecordsCount} student data records across ${affectedAdvisorIds.length} assignees.`,
         },
       });
 
@@ -1115,7 +1620,7 @@ export class UploadsService {
           data: {
             type: 'DATA_ASSIGNMENT',
             title: 'Student Data Reclaimed',
-            message: `${advRecordsCount} assigned student data records have been reclaimed by your manager.`,
+            message: `${advRecordsCount} assigned student data records have been reclaimed by management.`,
           },
         });
 
@@ -1129,11 +1634,205 @@ export class UploadsService {
       }
 
       return {
-        message: `Successfully reclaimed ${totalRecordsCount} student data records across ${affectedAdvisorIds.length} Program Advisors.`,
+        message: `Successfully reclaimed ${totalRecordsCount} student data records across ${affectedAdvisorIds.length} assignees.`,
         affectedAdvisorsCount: affectedAdvisorIds.length,
         reclaimedAssignmentsCount: activeAssignments.length,
         reclaimedRecordsCount: totalRecordsCount,
       };
     });
+  }
+
+  async exportDatasetResponseHistory(
+    uploadId: string,
+    res: Response,
+    disposition?: string,
+    calledById?: string,
+  ) {
+    const upload = await this.prisma.dataUpload.findUnique({
+      where: { id: uploadId },
+      select: { id: true, fileName: true },
+    });
+
+    if (!upload) {
+      throw new NotFoundException('Data upload record not found');
+    }
+
+    const whereCondition: Prisma.StudentDataWhereInput = { uploadId };
+
+    const hasDispFilter = disposition && disposition !== 'ALL';
+    const hasCallerFilter = calledById && calledById !== 'ALL';
+
+    if (hasDispFilter || hasCallerFilter) {
+      if (disposition === 'NO_CALL_YET' || calledById === 'NO_CALLER') {
+        whereCondition.callRecords = { none: {} };
+      } else {
+        let matchingStudentIds: { studentDataId: string }[] = [];
+        try {
+          if (hasDispFilter && hasCallerFilter) {
+            matchingStudentIds = await this.prisma.$queryRaw`
+              SELECT c."studentDataId"
+              FROM (
+                SELECT DISTINCT ON ("studentDataId") "studentDataId", "outcome", "createdById"
+                FROM "CallRecord"
+                ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+              ) c
+              JOIN "StudentData" s ON s."id" = c."studentDataId"
+              WHERE s."uploadId" = ${uploadId}::uuid
+                AND c."outcome" = ${disposition}::"CallOutcome"
+                AND c."createdById" = ${calledById}::uuid
+            `;
+          } else if (hasDispFilter) {
+            matchingStudentIds = await this.prisma.$queryRaw`
+              SELECT c."studentDataId"
+              FROM (
+                SELECT DISTINCT ON ("studentDataId") "studentDataId", "outcome"
+                FROM "CallRecord"
+                ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+              ) c
+              JOIN "StudentData" s ON s."id" = c."studentDataId"
+              WHERE s."uploadId" = ${uploadId}::uuid
+                AND c."outcome" = ${disposition}::"CallOutcome"
+            `;
+          } else if (hasCallerFilter) {
+            matchingStudentIds = await this.prisma.$queryRaw`
+              SELECT c."studentDataId"
+              FROM (
+                SELECT DISTINCT ON ("studentDataId") "studentDataId", "createdById"
+                FROM "CallRecord"
+                ORDER BY "studentDataId", "createdAt" DESC, "id" DESC
+              ) c
+              JOIN "StudentData" s ON s."id" = c."studentDataId"
+              WHERE s."uploadId" = ${uploadId}::uuid
+                AND c."createdById" = ${calledById}::uuid
+            `;
+          }
+        } catch (_) {
+          matchingStudentIds = [];
+        }
+
+        const studentIds = matchingStudentIds.map((r) => r.studentDataId);
+        if (studentIds.length > 0) {
+          whereCondition.id = { in: studentIds };
+        } else {
+          whereCondition.id = '00000000-0000-0000-0000-000000000000';
+        }
+      }
+    }
+
+    const students = await this.prisma.studentData.findMany({
+      where: whereCondition,
+      orderBy: { createdAt: 'asc' },
+      include: {
+        callRecords: {
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+          select: {
+            outcome: true,
+            notes: true,
+            createdAt: true,
+            createdBy: {
+              select: {
+                firstName: true,
+                lastName: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const OUTCOME_LABEL_MAP: Record<string, string> = {
+      NO_ANSWER: 'No Answer',
+      WRONG_NUMBER: 'Wrong Number',
+      NOT_INTERESTED: 'Not Interested',
+      FOLLOW_UP: 'Follow Up',
+      CALL_BACK_LATER: 'Call Back Later',
+      INTERESTED: 'Interested',
+      DISCONNECTED: 'Disconnected',
+    };
+
+    const rows = students.map((student) => {
+      const fullName = [student.firstName, student.middleName, student.lastName]
+        .filter(Boolean)
+        .join(' ');
+
+      const location = [student.city, student.state]
+        .filter(Boolean)
+        .join(', ');
+
+      const latestCall = student.callRecords?.[0];
+      let disposition = 'No Call Yet';
+      let notes = '';
+      let calledBy = 'No Caller';
+
+      if (latestCall) {
+        disposition =
+          OUTCOME_LABEL_MAP[latestCall.outcome] ||
+          latestCall.outcome.replace(/_/g, ' ');
+        notes = latestCall.notes || '';
+        if (latestCall.createdBy) {
+          calledBy = `${latestCall.createdBy.firstName} ${latestCall.createdBy.lastName || ''}`.trim();
+        } else {
+          calledBy = 'System / Advisor';
+        }
+      }
+
+      return {
+        'Name': fullName,
+        'Phone Number': student.phone,
+        'Email': student.email || '',
+        'Location': location,
+        'Disposition': disposition,
+        'Notes': notes,
+        'Called By': calledBy,
+        'Dataset File': upload.fileName,
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(rows, {
+      header: [
+        'Name',
+        'Phone Number',
+        'Email',
+        'Location',
+        'Disposition',
+        'Notes',
+        'Called By',
+        'Dataset File',
+      ],
+    });
+
+    worksheet['!cols'] = [
+      { wch: 25 },
+      { wch: 18 },
+      { wch: 25 },
+      { wch: 20 },
+      { wch: 18 },
+      { wch: 40 },
+      { wch: 22 },
+      { wch: 25 },
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Response History');
+
+    const excelBuffer = XLSX.write(workbook, {
+      type: 'buffer',
+      bookType: 'xlsx',
+    });
+
+    const cleanBaseName = upload.fileName.replace(/\.(xlsx|xls|csv)$/i, '');
+    const downloadFileName = `${cleanBaseName} (response).xlsx`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encodeURIComponent(downloadFileName)}"`,
+    );
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.send(excelBuffer);
   }
 }

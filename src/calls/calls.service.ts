@@ -4,21 +4,27 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TeamLeadAuthorizationService } from '../teams/team-lead-authorization.service';
 import type {
   TelephonyProvider,
   CallSession,
 } from './interfaces/telephony-provider.interface';
 import { DataAssignmentStatus } from '@prisma/client';
 import { CreateCallOutcomeDto } from './dto/create-call-outcome.dto';
+import { GetCallLogsDto } from './dto/get-call-logs.dto';
 
 @Injectable()
 export class CallsService {
   constructor(
     private readonly prisma: PrismaService,
+    @Optional()
+    private readonly teamLeadAuthService?: TeamLeadAuthorizationService,
     @Inject('TelephonyProvider')
-    private readonly telephonyProvider: any,
+    @Optional()
+    private readonly telephonyProvider?: any,
   ) { }
 
   async getCallQueue(advisorUserId: string) {
@@ -29,6 +35,7 @@ export class CallsService {
       },
       include: {
         items: {
+          orderBy: { id: 'asc' },
           include: {
             studentData: {
               include: {
@@ -44,7 +51,10 @@ export class CallsService {
           },
         },
       },
-      orderBy: { assignedAt: 'desc' },
+      orderBy: [
+        { assignedAt: 'asc' },
+        { id: 'asc' },
+      ],
     });
 
     const queueItems: any[] = [];
@@ -84,12 +94,12 @@ export class CallsService {
     const completedRecords =
       studentDataIds.length > 0
         ? await this.prisma.callRecord.findMany({
-            where: {
-              createdById: advisorUserId,
-              studentDataId: { in: studentDataIds },
-            },
-            select: { studentDataId: true },
-          })
+          where: {
+            createdById: advisorUserId,
+            studentDataId: { in: studentDataIds },
+          },
+          select: { studentDataId: true },
+        })
         : [];
 
     const completedSet = new Set(completedRecords.map((r) => r.studentDataId));
@@ -147,6 +157,291 @@ export class CallsService {
     }
   }
 
+  async canUserAccessStudentData(
+    studentDataId: string,
+    userId: string,
+    roleId?: number,
+  ): Promise<boolean> {
+    const isAdminOrManager = await this.isSuperAdminOrManager(userId, roleId);
+    if (isAdminOrManager) {
+      const exists = await this.prisma.studentData.findUnique({
+        where: { id: studentDataId },
+        select: { id: true },
+      });
+      return !!exists;
+    }
+
+    const isTeamLead = this.teamLeadAuthService
+      ? await this.teamLeadAuthService.isTeamLead(userId)
+      : false;
+
+    if (isTeamLead && this.teamLeadAuthService) {
+      const supervisedAdvisorIds =
+        await this.teamLeadAuthService.getTeamLeadAdvisorIds(userId);
+      const authorizedUserIds = [userId, ...supervisedAdvisorIds];
+
+      const count = await this.prisma.studentData.count({
+        where: {
+          id: studentDataId,
+          OR: [
+            {
+              assignmentItems: {
+                some: {
+                  assignment: {
+                    assignedToId: { in: authorizedUserIds },
+                    status: DataAssignmentStatus.ACTIVE,
+                  },
+                },
+              },
+            },
+            {
+              callRecords: {
+                some: { createdById: { in: authorizedUserIds } },
+              },
+            },
+          ],
+        },
+      });
+      return count > 0;
+    }
+
+    const count = await this.prisma.studentData.count({
+      where: {
+        id: studentDataId,
+        OR: [
+          {
+            assignmentItems: {
+              some: {
+                assignment: {
+                  assignedToId: userId,
+                  status: DataAssignmentStatus.ACTIVE,
+                },
+              },
+            },
+          },
+          {
+            callRecords: {
+              some: { createdById: userId },
+            },
+          },
+        ],
+      },
+    });
+    return count > 0;
+  }
+
+  async getCallLogs(
+    dto: GetCallLogsDto,
+    userId: string,
+    roleId?: number,
+  ) {
+    const page = Math.max(1, Number(dto.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(dto.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    const isAdminOrManager = await this.isSuperAdminOrManager(userId, roleId);
+    const isTeamLead = this.teamLeadAuthService
+      ? await this.teamLeadAuthService.isTeamLead(userId)
+      : false;
+
+    const twoDaysAgo = new Date();
+    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+    twoDaysAgo.setHours(0, 0, 0, 0);
+
+    let roleWhereCondition: any = {};
+
+    if (isAdminOrManager) {
+      roleWhereCondition = {
+        callRecords: { some: { createdAt: { gte: twoDaysAgo } } },
+      };
+    } else if (isTeamLead && this.teamLeadAuthService) {
+      const supervisedAdvisorIds =
+        await this.teamLeadAuthService.getTeamLeadAdvisorIds(userId);
+      const authorizedUserIds = [userId, ...supervisedAdvisorIds];
+
+      roleWhereCondition = {
+        callRecords: {
+          some: {
+            createdById: { in: authorizedUserIds },
+            createdAt: { gte: twoDaysAgo },
+          },
+        },
+      };
+    } else {
+      roleWhereCondition = {
+        callRecords: {
+          some: {
+            createdById: userId,
+            createdAt: { gte: twoDaysAgo },
+          },
+        },
+      };
+    }
+
+    const whereConditions: any[] = [roleWhereCondition];
+
+    if (dto.search && dto.search.trim().length > 0) {
+      const searchTerm = dto.search.trim();
+      const parts = searchTerm.split(/\s+/).filter(Boolean);
+
+      const searchOrs: any[] = [
+        { firstName: { contains: searchTerm, mode: 'insensitive' } },
+        { lastName: { contains: searchTerm, mode: 'insensitive' } },
+        { phone: { contains: searchTerm, mode: 'insensitive' } },
+        { email: { contains: searchTerm, mode: 'insensitive' } },
+        { city: { contains: searchTerm, mode: 'insensitive' } },
+        { state: { contains: searchTerm, mode: 'insensitive' } },
+      ];
+
+      if (parts.length > 1) {
+        searchOrs.push({
+          AND: [
+            { firstName: { contains: parts[0], mode: 'insensitive' } },
+            { lastName: { contains: parts[parts.length - 1], mode: 'insensitive' } },
+          ],
+        });
+      }
+
+      whereConditions.push({ OR: searchOrs });
+    }
+
+    const finalWhere = { AND: whereConditions };
+
+    const candidateStudents = await this.prisma.studentData.findMany({
+      where: finalWhere,
+      select: {
+        id: true,
+        callRecords: {
+          where: { createdAt: { gte: twoDaysAgo } },
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+          select: { outcome: true, createdAt: true },
+        },
+      },
+    });
+
+    const nowTime = Date.now();
+    const twentyFourHoursAgo = new Date(nowTime - 24 * 60 * 60 * 1000);
+
+    const bookmarkedStudentIds: string[] = candidateStudents
+      .filter((student) => {
+        const latestCall = student.callRecords[0];
+        if (!latestCall) return false;
+        const outcomeStr = String(latestCall.outcome || '').toUpperCase();
+        const isBookmarkOutcome =
+          outcomeStr === 'FOLLOW_UP' ||
+          outcomeStr === 'CALL_BACK_LATER' ||
+          outcomeStr === 'FOLLOW_UP_REQUIRED';
+        return isBookmarkOutcome && new Date(latestCall.createdAt) >= twentyFourHoursAgo;
+      })
+      .map((student) => student.id);
+
+    const bookmarkedCount = bookmarkedStudentIds.length;
+
+    let total = candidateStudents.length;
+    let queryWhere: any = finalWhere;
+
+    if (dto.bookmarkedOnly) {
+      total = bookmarkedCount;
+      queryWhere = {
+        AND: [finalWhere, { id: { in: bookmarkedStudentIds } }],
+      };
+    }
+
+    const studentRecords = await this.prisma.studentData.findMany({
+      where: queryWhere,
+      skip,
+      take: limit,
+      include: {
+        upload: {
+          select: {
+            id: true,
+            fileName: true,
+            uploadedAt: true,
+          },
+        },
+        callRecords: {
+          where: { createdAt: { gte: twoDaysAgo } },
+          include: {
+            createdBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const data = studentRecords.map((student) => {
+      const latestCall = student.callRecords[0] || null;
+      let isBookmarked = false;
+      let bookmarkExpiresAt: string | null = null;
+
+      if (latestCall) {
+        const outcomeStr = String(latestCall.outcome || '').toUpperCase();
+        const isBookmarkOutcome =
+          outcomeStr === 'FOLLOW_UP' ||
+          outcomeStr === 'CALL_BACK_LATER' ||
+          outcomeStr === 'FOLLOW_UP_REQUIRED';
+
+        if (isBookmarkOutcome) {
+          const createdAtTime = new Date(latestCall.createdAt).getTime();
+          const expiresAtTime = createdAtTime + 24 * 60 * 60 * 1000;
+          if (expiresAtTime > nowTime) {
+            isBookmarked = true;
+            bookmarkExpiresAt = new Date(expiresAtTime).toISOString();
+          }
+        }
+      }
+
+      const fullName = [student.firstName, student.middleName, student.lastName]
+        .filter(Boolean)
+        .join(' ');
+
+      return {
+        studentDataId: student.id,
+        firstName: student.firstName,
+        middleName: student.middleName,
+        lastName: student.lastName,
+        fullName,
+        phone: student.phone,
+        email: student.email,
+        city: student.city,
+        state: student.state,
+        uploadFileName: student.upload?.fileName || 'Data Upload',
+        totalCalls: student.callRecords.length,
+        latestCall: latestCall
+          ? {
+            id: latestCall.id,
+            outcome: latestCall.outcome,
+            notes: latestCall.notes,
+            startedAt: latestCall.startedAt,
+            endedAt: latestCall.endedAt,
+            durationSeconds: latestCall.durationSeconds,
+            createdAt: latestCall.createdAt,
+            createdBy: latestCall.createdBy,
+          }
+          : null,
+        isBookmarked,
+        bookmarkExpiresAt,
+      };
+    });
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      bookmarkedCount,
+    };
+  }
+
   async getAssignedStudentDataOne(
     studentDataId: string,
     advisorUserId: string,
@@ -171,21 +466,26 @@ export class CallsService {
           where: isAdminOrManager
             ? { assignment: { status: DataAssignmentStatus.ACTIVE } }
             : {
-                assignment: {
-                  assignedToId: advisorUserId,
-                  status: DataAssignmentStatus.ACTIVE,
-                },
+              assignment: {
+                assignedToId: advisorUserId,
+                status: DataAssignmentStatus.ACTIVE,
               },
+            },
           include: {
             assignment: {
               select: {
                 id: true,
+                assignedToId: true,
                 assignedAt: true,
                 expiresAt: true,
                 status: true,
               },
             },
           },
+        },
+        callRecords: {
+          where: { createdById: advisorUserId },
+          select: { id: true },
         },
       },
     });
@@ -194,13 +494,52 @@ export class CallsService {
       throw new NotFoundException('Student data record not found.');
     }
 
-    if (
-      !isAdminOrManager &&
-      (!studentData.assignmentItems || studentData.assignmentItems.length === 0)
-    ) {
-      throw new ForbiddenException(
-        'Access denied: Student data record is not currently assigned to you.',
-      );
+    if (!isAdminOrManager) {
+      const isAssignedToUser =
+        studentData.assignmentItems && studentData.assignmentItems.length > 0;
+      const hasCallRecords =
+        studentData.callRecords && studentData.callRecords.length > 0;
+
+      let isSupervisedAdvisor = false;
+      if (!isAssignedToUser && !hasCallRecords && this.teamLeadAuthService) {
+        const isTeamLead = await this.teamLeadAuthService.isTeamLead(advisorUserId);
+        if (isTeamLead) {
+          const supervisedAdvisorIds =
+            await this.teamLeadAuthService.getTeamLeadAdvisorIds(advisorUserId);
+          if (supervisedAdvisorIds.length > 0) {
+            const supervisedCheck = await this.prisma.studentData.findFirst({
+              where: {
+                id: studentDataId,
+                OR: [
+                  {
+                    assignmentItems: {
+                      some: {
+                        assignment: {
+                          assignedToId: { in: supervisedAdvisorIds },
+                          status: DataAssignmentStatus.ACTIVE,
+                        },
+                      },
+                    },
+                  },
+                  {
+                    callRecords: {
+                      some: { createdById: { in: supervisedAdvisorIds } },
+                    },
+                  },
+                ],
+              },
+              select: { id: true },
+            });
+            isSupervisedAdvisor = !!supervisedCheck;
+          }
+        }
+      }
+
+      if (!isAssignedToUser && !hasCallRecords && !isSupervisedAdvisor) {
+        throw new ForbiddenException(
+          'Access denied: Student data record is not currently assigned to you.',
+        );
+      }
     }
 
     return {

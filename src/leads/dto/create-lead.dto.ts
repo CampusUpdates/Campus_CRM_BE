@@ -8,6 +8,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
   Max,
 } from 'class-validator';
@@ -92,6 +93,11 @@ export class CreateLeadDto {
   @ArrayMinSize(1, { message: 'At least one college must be selected' })
   @IsString({ each: true, message: 'Invalid college ID' })
   collegeIds!: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true, message: 'Every negative college ID must be a valid UUID' })
+  negativeCollegeIds?: string[];
 
   @IsEnum(LeadSource)
   source!: LeadSource;

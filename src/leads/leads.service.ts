@@ -113,6 +113,35 @@ export class LeadsService {
     return null;
   }
 
+  private async validateCollegeIdsExist(
+    tx: any,
+    collegeIds: string[],
+    fieldName = 'negativeCollegeIds',
+  ) {
+    if (!collegeIds || collegeIds.length === 0) return;
+    const uniqueIds = Array.from(new Set(collegeIds));
+    const foundColleges = await tx.college.findMany({
+      where: {
+        id: {
+          in: uniqueIds,
+        },
+      },
+      select: {
+        id: true,
+      },
+    });
+    const foundSet = new Set(foundColleges.map((c: { id: string }) => c.id));
+    const missingIds = uniqueIds.filter((id) => !foundSet.has(id));
+
+    if (missingIds.length > 0) {
+      throw new BadRequestException({
+        message: 'One or more selected colleges do not exist',
+        field: fieldName,
+        invalidIds: missingIds,
+      });
+    }
+  }
+
   async create(createLeadDto: CreateLeadDto, userId: string) {
     let targetStatusId: number;
     if (createLeadDto.statusId) {
@@ -157,9 +186,9 @@ export class LeadsService {
 
     const creatorUser = this.prisma.user
       ? await this.prisma.user.findUnique({
-          where: { id: userId },
-          select: { teamId: true },
-        })
+        where: { id: userId },
+        select: { teamId: true },
+      })
       : null;
     let resolvedTeamId: number | null = creatorUser?.teamId || null;
 
@@ -182,6 +211,7 @@ export class LeadsService {
 
     const {
       collegeIds,
+      negativeCollegeIds,
       dateOfBirth: rawDob,
       statusId: _,
       teamId: __,
@@ -215,6 +245,19 @@ export class LeadsService {
               ...(resolvedTeamId && { teamId: resolvedTeamId }),
             },
           });
+
+        if (negativeCollegeIds && negativeCollegeIds.length > 0) {
+          const uniqueNegativeIds = Array.from(new Set(negativeCollegeIds));
+          await this.validateCollegeIdsExist(tx, uniqueNegativeIds, 'negativeCollegeIds');
+
+          await tx.leadNegativeCollege.createMany({
+            data: uniqueNegativeIds.map((collegeId) => ({
+              leadId: lead.id,
+              collegeId,
+            })),
+            skipDuplicates: true,
+          });
+        }
 
         if (collegeIds && collegeIds.length > 0) {
           const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -348,10 +391,22 @@ export class LeadsService {
           },
         });
 
+        const negativeColleges = (tx as any).leadNegativeCollege
+          ? await (tx as any).leadNegativeCollege.findMany({
+              where: {
+                leadId: lead.id,
+              },
+              include: {
+                college: true,
+              },
+            })
+          : [];
+
         return {
           lead: {
             ...lead,
             collegeApplications,
+            negativeColleges,
           },
           assignment,
         };
@@ -744,6 +799,11 @@ export class LeadsService {
               },
             },
           },
+          negativeColleges: {
+            include: {
+              college: true,
+            },
+          },
         },
       }),
       this.prisma.lead.count({
@@ -843,7 +903,7 @@ export class LeadsService {
       );
     }
 
-    const { collegeIds, ...leadData } = updateLeadDto;
+    const { collegeIds, negativeCollegeIds, ...leadData } = updateLeadDto;
 
     return this.prisma.$transaction(
       async (tx) => {
@@ -856,6 +916,54 @@ export class LeadsService {
             status: true,
           },
         });
+
+        if (negativeCollegeIds !== undefined) {
+          const uniqueNegativeIds = Array.from(new Set(negativeCollegeIds));
+          if (uniqueNegativeIds.length > 0) {
+            await this.validateCollegeIdsExist(tx, uniqueNegativeIds, 'negativeCollegeIds');
+          }
+
+          const existingNegative = await tx.leadNegativeCollege.findMany({
+            where: { leadId },
+            select: { id: true, collegeId: true },
+          });
+
+          const existingCollegeIdMap = new Map(
+            existingNegative.map((item) => [item.collegeId, item.id]),
+          );
+          const requestedSet = new Set(uniqueNegativeIds);
+
+          const toRemoveIds: string[] = [];
+          for (const [colId, relId] of existingCollegeIdMap.entries()) {
+            if (!requestedSet.has(colId)) {
+              toRemoveIds.push(relId);
+            }
+          }
+
+          const toAddCollegeIds = uniqueNegativeIds.filter(
+            (colId) => !existingCollegeIdMap.has(colId),
+          );
+
+          if (toRemoveIds.length > 0) {
+            await tx.leadNegativeCollege.deleteMany({
+              where: {
+                id: {
+                  in: toRemoveIds,
+                },
+              },
+            });
+          }
+
+          if (toAddCollegeIds.length > 0) {
+            await tx.leadNegativeCollege.createMany({
+              data: toAddCollegeIds.map((collegeId) => ({
+                leadId,
+                collegeId,
+              })),
+              skipDuplicates: true,
+            });
+          }
+        }
 
         if (collegeIds !== undefined) {
           if (collegeIds.length === 0) {
@@ -987,9 +1095,19 @@ export class LeadsService {
           },
         });
 
+        const negativeColleges = (tx as any).leadNegativeCollege
+          ? await (tx as any).leadNegativeCollege.findMany({
+              where: { leadId },
+              include: {
+                college: true,
+              },
+            })
+          : [];
+
         return {
           ...updatedLead,
           collegeApplications,
+          negativeColleges,
         };
       },
       { timeout: 30000 },
@@ -1054,6 +1172,11 @@ export class LeadsService {
                 username: true,
               },
             },
+          },
+        },
+        negativeColleges: {
+          include: {
+            college: true,
           },
         },
         tpcs: {
@@ -2761,6 +2884,11 @@ export class LeadsService {
             },
           },
           orderBy: { createdAt: 'desc' },
+        },
+        negativeColleges: {
+          include: {
+            college: true,
+          },
         },
       },
     });

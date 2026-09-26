@@ -44,11 +44,19 @@ export class DashboardController {
     @Req() req: AuthenticatedRequest,
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('callTime') callTime?: string,
   ) {
+    const pageNum = page ? parseInt(page, 10) : 1;
+    const limitNum = limit ? parseInt(limit, 10) : 10;
     return this.dashboardService.getSuperAdminDashboardStats(
       req.user.sub,
       startDate,
       endDate,
+      pageNum,
+      limitNum,
+      callTime,
     );
   }
 

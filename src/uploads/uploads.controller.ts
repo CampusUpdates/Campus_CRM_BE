@@ -7,10 +7,12 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { UploadsService, UploadedMulterFile } from './uploads.service';
 import { CreateDataAssignmentDto } from './dto/create-data-assignment.dto';
@@ -113,6 +115,15 @@ export class UploadsController {
     );
   }
 
+  @Get('data-assignments/assignee/:assigneeId')
+  async findAssigneeAssignmentsDetail(
+    @Param('assigneeId') assigneeId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.findAssigneeAssignmentsDetail(assigneeId);
+  }
+
   @Get('data-assignments/:id')
   async findAssignmentDetails(
     @Param('id') id: string,
@@ -154,6 +165,45 @@ export class UploadsController {
     return this.uploadsService.reclaimAllAdvisorData(
       req.user.sub,
       req.user.roleId,
+    );
+  }
+
+  @Post('reclaim-assignment/:assignmentId')
+  async reclaimAssignmentById(
+    @Param('assignmentId') assignmentId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.reclaimAssignmentById(
+      assignmentId,
+      req.user.sub,
+      req.user.roleId,
+    );
+  }
+
+  @Get(':id/callers')
+  async getDatasetCallers(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.getDatasetCallers(id);
+  }
+
+  @Get(':id/export-response')
+  async exportDatasetResponseHistory(
+    @Param('id') id: string,
+    @Query('disposition') disposition: string | undefined,
+    @Query('calledById') calledById: string | undefined,
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.exportDatasetResponseHistory(
+      id,
+      res,
+      disposition,
+      calledById,
     );
   }
 
