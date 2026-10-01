@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { DataAssignmentStatus, DataUploadStatus, Prisma } from '@prisma/client';
+import { DataAssignmentStatus, DataUploadStatus, Prisma, CallOutcome } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import {
   CreateDataAssignmentDto,
@@ -1050,7 +1050,6 @@ export class UploadsService {
         });
 
         let totalAssignedRecords = 0;
-        let activeRecordsCount = 0;
         const uploadFileNames = new Set<string>();
         let earliestAssignedAt: Date | null = null;
         let latestAssignedAt: Date | null = null;
@@ -1058,9 +1057,6 @@ export class UploadsService {
         for (const a of assignments) {
           const itemCount = a.items.length;
           totalAssignedRecords += itemCount;
-          if (a.status === DataAssignmentStatus.ACTIVE) {
-            activeRecordsCount += itemCount;
-          }
 
           if (!earliestAssignedAt || a.assignedAt < earliestAssignedAt) {
             earliestAssignedAt = a.assignedAt;
@@ -1075,6 +1071,30 @@ export class UploadsService {
             }
           }
         }
+
+        const activeRecordsCount = await this.prisma.dataAssignmentItem.count({
+          where: {
+            assignment: {
+              assignedToId: assigneeId,
+              status: DataAssignmentStatus.ACTIVE,
+            },
+            studentData: {
+              callRecords: {
+                none: {
+                  outcome: {
+                    in: [
+                      CallOutcome.WRONG_NUMBER,
+                      CallOutcome.NOT_INTERESTED,
+                      CallOutcome.INTERESTED,
+                      CallOutcome.DISCONNECTED,
+                      CallOutcome.DROP,
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        });
 
         const firstCall = await this.prisma.callRecord.findFirst({
           where: { createdById: assigneeId },

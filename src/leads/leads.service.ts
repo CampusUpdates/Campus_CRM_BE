@@ -211,12 +211,18 @@ export class LeadsService {
 
     const {
       collegeIds,
-      negativeCollegeIds,
+      negativeColleges,
       dateOfBirth: rawDob,
       statusId: _,
       teamId: __,
       ...leadData
     } = createLeadDto;
+    if (leadData.source !== 'OTHER') {
+      (leadData as any).sourceOther = null;
+    }
+    if (leadData.courseInterested !== 'OTHER') {
+      (leadData as any).courseInterestedOther = null;
+    }
     const dateOfBirth = rawDob ? new Date(rawDob) : undefined;
     const now = new Date();
     const expiresAt = new Date(now);
@@ -246,17 +252,26 @@ export class LeadsService {
             },
           });
 
-        if (negativeCollegeIds && negativeCollegeIds.length > 0) {
-          const uniqueNegativeIds = Array.from(new Set(negativeCollegeIds));
-          await this.validateCollegeIdsExist(tx, uniqueNegativeIds, 'negativeCollegeIds');
-
-          await tx.leadNegativeCollege.createMany({
-            data: uniqueNegativeIds.map((collegeId) => ({
-              leadId: lead.id,
-              collegeId,
-            })),
-            skipDuplicates: true,
-          });
+        if (negativeColleges && negativeColleges.length > 0) {
+          const seen = new Set<string>();
+          const uniqueNegativeNames = negativeColleges
+            .map((name) => name.trim())
+            .filter((name) => {
+              if (!name) return false;
+              const lower = name.toLowerCase();
+              if (seen.has(lower)) return false;
+              seen.add(lower);
+              return true;
+            });
+          if (uniqueNegativeNames.length > 0) {
+            await tx.leadNegativeCollege.createMany({
+              data: uniqueNegativeNames.map((collegeName) => ({
+                leadId: lead.id,
+                collegeName,
+              })),
+              skipDuplicates: true,
+            });
+          }
         }
 
         if (collegeIds && collegeIds.length > 0) {
@@ -391,22 +406,19 @@ export class LeadsService {
           },
         });
 
-        const negativeColleges = (tx as any).leadNegativeCollege
+        const savedNegativeColleges = (tx as any).leadNegativeCollege
           ? await (tx as any).leadNegativeCollege.findMany({
-              where: {
-                leadId: lead.id,
-              },
-              include: {
-                college: true,
-              },
-            })
+            where: {
+              leadId: lead.id,
+            },
+          })
           : [];
 
         return {
           lead: {
             ...lead,
             collegeApplications,
-            negativeColleges,
+            negativeColleges: savedNegativeColleges,
           },
           assignment,
         };
@@ -799,11 +811,7 @@ export class LeadsService {
               },
             },
           },
-          negativeColleges: {
-            include: {
-              college: true,
-            },
-          },
+          negativeColleges: true,
         },
       }),
       this.prisma.lead.count({
@@ -903,7 +911,13 @@ export class LeadsService {
       );
     }
 
-    const { collegeIds, negativeCollegeIds, ...leadData } = updateLeadDto;
+    const { collegeIds, negativeColleges, ...leadData } = updateLeadDto;
+    if (leadData.source && leadData.source !== 'OTHER') {
+      (leadData as any).sourceOther = null;
+    }
+    if (leadData.courseInterested && leadData.courseInterested !== 'OTHER') {
+      (leadData as any).courseInterestedOther = null;
+    }
 
     return this.prisma.$transaction(
       async (tx) => {
@@ -917,31 +931,37 @@ export class LeadsService {
           },
         });
 
-        if (negativeCollegeIds !== undefined) {
-          const uniqueNegativeIds = Array.from(new Set(negativeCollegeIds));
-          if (uniqueNegativeIds.length > 0) {
-            await this.validateCollegeIdsExist(tx, uniqueNegativeIds, 'negativeCollegeIds');
-          }
+        if (negativeColleges !== undefined) {
+          const seen = new Set<string>();
+          const uniqueNegativeNames = negativeColleges
+            .map((name) => name.trim())
+            .filter((name) => {
+              if (!name) return false;
+              const lower = name.toLowerCase();
+              if (seen.has(lower)) return false;
+              seen.add(lower);
+              return true;
+            });
 
           const existingNegative = await tx.leadNegativeCollege.findMany({
             where: { leadId },
-            select: { id: true, collegeId: true },
+            select: { id: true, collegeName: true },
           });
 
-          const existingCollegeIdMap = new Map(
-            existingNegative.map((item) => [item.collegeId, item.id]),
+          const existingNameMap = new Map(
+            existingNegative.map((item) => [item.collegeName.toLowerCase(), item.id]),
           );
-          const requestedSet = new Set(uniqueNegativeIds);
+          const requestedSetLowercase = new Set(uniqueNegativeNames.map((name) => name.toLowerCase()));
 
           const toRemoveIds: string[] = [];
-          for (const [colId, relId] of existingCollegeIdMap.entries()) {
-            if (!requestedSet.has(colId)) {
+          for (const [colNameLower, relId] of existingNameMap.entries()) {
+            if (!requestedSetLowercase.has(colNameLower)) {
               toRemoveIds.push(relId);
             }
           }
 
-          const toAddCollegeIds = uniqueNegativeIds.filter(
-            (colId) => !existingCollegeIdMap.has(colId),
+          const toAddNames = uniqueNegativeNames.filter(
+            (name) => !existingNameMap.has(name.toLowerCase()),
           );
 
           if (toRemoveIds.length > 0) {
@@ -954,11 +974,11 @@ export class LeadsService {
             });
           }
 
-          if (toAddCollegeIds.length > 0) {
+          if (toAddNames.length > 0) {
             await tx.leadNegativeCollege.createMany({
-              data: toAddCollegeIds.map((collegeId) => ({
+              data: toAddNames.map((collegeName) => ({
                 leadId,
-                collegeId,
+                collegeName,
               })),
               skipDuplicates: true,
             });
@@ -1095,19 +1115,16 @@ export class LeadsService {
           },
         });
 
-        const negativeColleges = (tx as any).leadNegativeCollege
+        const savedNegativeColleges = (tx as any).leadNegativeCollege
           ? await (tx as any).leadNegativeCollege.findMany({
-              where: { leadId },
-              include: {
-                college: true,
-              },
-            })
+            where: { leadId },
+          })
           : [];
 
         return {
           ...updatedLead,
           collegeApplications,
-          negativeColleges,
+          negativeColleges: savedNegativeColleges,
         };
       },
       { timeout: 30000 },
@@ -1174,11 +1191,7 @@ export class LeadsService {
             },
           },
         },
-        negativeColleges: {
-          include: {
-            college: true,
-          },
-        },
+        negativeColleges: true,
         tpcs: {
           include: {
             assignments: {
@@ -2885,11 +2898,7 @@ export class LeadsService {
           },
           orderBy: { createdAt: 'desc' },
         },
-        negativeColleges: {
-          include: {
-            college: true,
-          },
-        },
+        negativeColleges: true,
       },
     });
 
@@ -3607,8 +3616,32 @@ export class LeadsService {
         graduationCourse: lead.graduationCourse,
         graduationSpecialization: lead.graduationSpecialization,
         courseInterested: lead.courseInterested,
+        courseInterestedOther: lead.courseInterestedOther,
         specializationInterested: lead.specializationInterested,
         passingYear: lead.passingYear,
+        // Family Information
+        fatherName: lead.fatherName,
+        fatherOccupation: lead.fatherOccupation,
+        fatherPhone: lead.fatherPhone,
+        motherName: lead.motherName,
+        motherOccupation: lead.motherOccupation,
+        motherPhone: lead.motherPhone,
+        physicalAddress: lead.physicalAddress,
+        // 10th Academic Information
+        tenthSchoolName: lead.tenthSchoolName,
+        tenthBoard: lead.tenthBoard,
+        tenthPassoutYear: lead.tenthPassoutYear,
+        // 12th Academic Information
+        twelfthSchoolName: lead.twelfthSchoolName,
+        twelfthBoard: lead.twelfthBoard,
+        twelfthPassoutYear: lead.twelfthPassoutYear,
+        // Graduation Information
+        graduationCollegeName: lead.graduationCollegeName,
+        graduationUniversity: lead.graduationUniversity,
+        graduationPassoutYear: lead.graduationPassoutYear,
+        // Calling / Notes
+        bestTimeToCall: lead.bestTimeToCall,
+        notes: lead.notes,
         source: lead.source,
         createdAt: lead.createdAt,
         updatedAt: lead.updatedAt,

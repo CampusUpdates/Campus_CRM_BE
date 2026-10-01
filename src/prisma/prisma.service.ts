@@ -70,11 +70,14 @@ export class PrismaService
                     errCode === 'P1003' ||
                     errCode === 'P1017' ||
                     errCode === 'P2024' ||
+                    errCode === '26000' ||
+                    errCode === '42P05' ||
                     errMsg.includes("Can't reach database server") ||
                     errMsg.includes('Connection reset') ||
                     errMsg.includes('Closed connection') ||
                     errMsg.includes('EMAXCONNSESSION') ||
                     errMsg.includes('max clients') ||
+                    errMsg.includes('prepared statement') ||
                     errMsg.includes('timeout') ||
                     errMsg.includes('EngineTerminatedError'));
 

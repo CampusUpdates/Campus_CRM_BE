@@ -11,6 +11,9 @@ import {
   IsUUID,
   Min,
   Max,
+  Matches,
+  ValidateIf,
+  IsEmpty,
 } from 'class-validator';
 
 import { Gender, LeadSource, CourseType } from '@prisma/client';
@@ -81,6 +84,11 @@ export class CreateLeadDto {
   @IsEnum(CourseType)
   courseInterested?: CourseType;
 
+  @ValidateIf((o) => o.courseInterested === CourseType.OTHER)
+  @IsNotEmpty({ message: 'Specify Course is required when course interested is Other' })
+  @IsString()
+  courseInterestedOther?: string;
+
   @IsOptional()
   @IsString()
   specializationInterested?: string;
@@ -89,6 +97,96 @@ export class CreateLeadDto {
   @IsInt()
   passingYear?: number;
 
+  // Family Information
+  @IsOptional()
+  @IsString()
+  fatherName?: string;
+
+  @IsOptional()
+  @IsString()
+  fatherOccupation?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Father phone number must be exactly 10 digits' })
+  fatherPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  aadharNumber?: string;
+
+  @IsOptional()
+  @IsString()
+  motherName?: string;
+
+  @IsOptional()
+  @IsString()
+  motherOccupation?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Mother phone number must be exactly 10 digits' })
+  motherPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  physicalAddress?: string;
+
+  // 10th Academic Information
+  @IsOptional()
+  @IsString()
+  tenthSchoolName?: string;
+
+  @IsOptional()
+  @IsString()
+  tenthBoard?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1950)
+  @Max(2100)
+  tenthPassoutYear?: number;
+
+  // 12th Academic Information
+  @IsOptional()
+  @IsString()
+  twelfthSchoolName?: string;
+
+  @IsOptional()
+  @IsString()
+  twelfthBoard?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1950)
+  @Max(2100)
+  twelfthPassoutYear?: number;
+
+  // Graduation Information
+  @IsOptional()
+  @IsString()
+  graduationCollegeName?: string;
+
+
+  @IsOptional()
+  @IsString()
+  graduationUniversity?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1950)
+  @Max(2100)
+  graduationPassoutYear?: number;
+
+  // Calling / Notes
+  @IsOptional()
+  @IsString()
+  bestTimeToCall?: string;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+
   @IsArray({ message: 'At least one college must be selected' })
   @ArrayMinSize(1, { message: 'At least one college must be selected' })
   @IsString({ each: true, message: 'Invalid college ID' })
@@ -96,11 +194,16 @@ export class CreateLeadDto {
 
   @IsOptional()
   @IsArray()
-  @IsUUID('4', { each: true, message: 'Every negative college ID must be a valid UUID' })
-  negativeCollegeIds?: string[];
+  @IsString({ each: true })
+  negativeColleges?: string[];
 
   @IsEnum(LeadSource)
   source!: LeadSource;
+
+  @ValidateIf((o) => o.source === LeadSource.OTHER)
+  @IsNotEmpty({ message: 'Specify Lead Source is required when source is Other' })
+  @IsString()
+  sourceOther?: string;
 
   @IsOptional()
   @IsInt()
@@ -109,4 +212,11 @@ export class CreateLeadDto {
   @IsOptional()
   @IsInt()
   teamId?: number;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]+$/, {
+    message: 'Application ID can contain only letters, numbers, hyphens (-), and underscores (_).',
+  })
+  applicationId?: string;
 }

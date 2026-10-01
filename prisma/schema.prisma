@@ -186,7 +186,6 @@ model College {
   courses            Course[]
   finalEnrolledLeads Lead[]              @relation("FinalCollege")
   leadApplications   LeadCollege[]
-  negativeLeadColleges LeadNegativeCollege[]
 
   @@index([approvedById])
 }
@@ -207,9 +206,9 @@ model LeadStatus {
 }
 
 model Lead {
-  id                       String                 @id @default(uuid()) @db.Uuid
+  id                       String      @id @default(uuid()) @db.Uuid
   statusId                 Int
-  createdById              String                 @db.Uuid
+  createdById              String      @db.Uuid
   teamId                   Int?
   firstName                String
   lastName                 String?
@@ -217,7 +216,7 @@ model Lead {
   alternatePhone           String?
   email                    String?
   gender                   Gender?
-  dateOfBirth              DateTime?              @db.Date
+  dateOfBirth              DateTime?   @db.Date
   city                     String?
   state                    String?
   tenthPercentage          Float?
@@ -226,24 +225,57 @@ model Lead {
   graduationCourse         String?
   graduationSpecialization String?
   courseInterested         CourseType?
+  courseInterestedOther    String?
   specializationInterested String?
   passingYear              Int?
-  source                   LeadSource
-  createdAt                DateTime               @default(now())
-  updatedAt                DateTime               @updatedAt
-  finalCollegeId           String?                @db.Uuid
-  interactions             Interaction[]
-  createdBy                User                   @relation("LeadCreator", fields: [createdById], references: [id])
-  team                     Team?                  @relation(fields: [teamId], references: [id], onDelete: SetNull)
-  finalCollege             College?               @relation("FinalCollege", fields: [finalCollegeId], references: [id], onDelete: SetNull)
-  status                   LeadStatus             @relation(fields: [statusId], references: [id])
-  assignments              LeadAssignment[]
-  claimRequests            LeadClaimRequest[]
-  collegeApplications      LeadCollege[]
-  negativeColleges         LeadNegativeCollege[]
-  ownershipHistories       LeadOwnershipHistory[]
-  tpcs                     TPC[]
-  callRecords              CallRecord[]
+
+  // Family Information
+  fatherName       String?
+  fatherOccupation String?
+  fatherPhone      String?
+  motherName       String?
+  motherOccupation String?
+  motherPhone      String?
+  physicalAddress  String? @db.Text
+
+  // 10th Academic Information
+  tenthSchoolName  String?
+  tenthBoard       String?
+  tenthPassoutYear Int?
+
+  // 12th Academic Information
+  twelfthSchoolName  String?
+  twelfthBoard       String?
+  twelfthPassoutYear Int?
+
+  // Graduation Information
+  graduationCollegeName String?
+  graduationUniversity  String?
+  graduationPassoutYear Int?
+
+  // Calling / Notes
+  bestTimeToCall String?
+  notes          String? @db.Text
+
+  aadharNumber String?
+
+  source              LeadSource
+  sourceOther         String?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  finalCollegeId      String?                @db.Uuid
+  interactions        Interaction[]
+  createdBy           User                   @relation("LeadCreator", fields: [createdById], references: [id])
+  team                Team?                  @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  finalCollege        College?               @relation("FinalCollege", fields: [finalCollegeId], references: [id], onDelete: SetNull)
+  status              LeadStatus             @relation(fields: [statusId], references: [id])
+  assignments         LeadAssignment[]
+  claimRequests       LeadClaimRequest[]
+  collegeApplications LeadCollege[]
+  negativeColleges    LeadNegativeCollege[]
+  ownershipHistories  LeadOwnershipHistory[]
+  tpcs                TPC[]
+  callRecords         CallRecord[]
 
   @@index([statusId])
   @@index([createdById])
@@ -302,18 +334,15 @@ model LeadCollege {
 }
 
 model LeadNegativeCollege {
-  id        String   @id @default(uuid()) @db.Uuid
-  leadId    String   @db.Uuid
-  collegeId String   @db.Uuid
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String   @id @default(uuid()) @db.Uuid
+  leadId      String   @db.Uuid
+  collegeName String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  lead    Lead    @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  college College @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
-  @@unique([leadId, collegeId])
   @@index([leadId])
-  @@index([collegeId])
 }
 
 model Interaction {
@@ -749,16 +778,16 @@ enum CourseType {
   PGDM
   MCA
   BBA
+  OTHER
 }
 
 enum LeadSource {
-  WEBSITE
-  FACEBOOK
-  INSTAGRAM
-  GOOGLE
-  REFERRAL
-  DATA_UPLOAD
-  COLLEGE_EVENT
+  CAT
+  NMAT
+  MHCET
+  MAT
+  IBSAT
+  SNAP
   OTHER
 }
 
