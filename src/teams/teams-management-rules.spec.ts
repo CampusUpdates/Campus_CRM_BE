@@ -230,6 +230,11 @@ describe('TeamsService - Complete Team Lead & PA Team Management Rules', () => {
         where: {
           OR: [{ teamId: 1 }, { managerId: 'mgr-1' }],
           status: 'ACTIVE',
+          role: {
+            name: {
+              in: ['PROGRAM_ADVISOR', 'Program Advisor', 'TEAM_LEAD', 'Team Lead'],
+            },
+          },
         },
         select: expect.anything(),
         orderBy: { firstName: 'asc' },

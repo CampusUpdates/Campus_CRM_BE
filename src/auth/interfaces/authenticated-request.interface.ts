@@ -8,6 +8,7 @@ export interface JwtPayload {
   firstName: string;
   lastName?: string | null;
   roleId: number;
+  roleName?: string;
   teamId?: number | null;
   type: string;
 }

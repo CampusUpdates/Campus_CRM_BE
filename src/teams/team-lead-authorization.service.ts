@@ -134,6 +134,33 @@ export class TeamLeadAuthorizationService {
   }
 
   /**
+   * Resolve the full Team Lead scope for dashboard/reporting.
+   * Returns PA IDs, team IDs, and the team lead user ID.
+   * Reusable by dashboard metrics, drilldowns, tables, and future reporting.
+   */
+  async getTeamLeadScope(userId: string): Promise<{
+    paIds: string[];
+    teamLeadId: string;
+    teamIds: number[];
+  }> {
+    if (!userId) {
+      return { paIds: [], teamLeadId: userId, teamIds: [] };
+    }
+
+    const teamIds = await this.getTeamLeadAssignedTeamIds(userId);
+    if (teamIds.length === 0) {
+      return { paIds: [], teamLeadId: userId, teamIds: [] };
+    }
+
+    const paIds = await this.getTeamLeadAdvisorIds(userId);
+    return {
+      paIds,
+      teamLeadId: userId,
+      teamIds,
+    };
+  }
+
+  /**
    * Check if teamLeadId is authorized to access/mutate a Lead.
    * Rules:
    * 1. Lead created by teamLeadId or supervised Program Advisors

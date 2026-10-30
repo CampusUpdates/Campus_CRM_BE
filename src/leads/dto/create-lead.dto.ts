@@ -14,9 +14,33 @@ import {
   Matches,
   ValidateIf,
   IsEmpty,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 import { Gender, LeadSource, CourseType } from '@prisma/client';
+
+export class CreateCounsellingRequestItemDto {
+  @IsNotEmpty({ message: 'College ID is required for counselling' })
+  @IsUUID('4', { message: 'Invalid college UUID' })
+  collegeId!: string;
+
+  @IsOptional()
+  @IsString()
+  preferredDate?: string;
+
+  @IsOptional()
+  @IsString()
+  preferredTime?: string;
+
+  @IsOptional()
+  @IsString()
+  preferredTiming?: string;
+
+  @IsOptional()
+  @IsString()
+  purpose?: string;
+}
 
 export class CreateLeadDto {
   @IsNotEmpty({ message: 'First name is required' })
@@ -29,10 +53,12 @@ export class CreateLeadDto {
 
   @IsNotEmpty({ message: 'Phone number is required' })
   @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Phone number must be exactly 10 digits' })
   phone!: string;
 
   @IsOptional()
   @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Alternate phone number must be exactly 10 digits' })
   alternatePhone?: string;
 
   @IsNotEmpty({ message: 'Email address is required' })
@@ -50,6 +76,26 @@ export class CreateLeadDto {
   @IsNotEmpty({ message: 'State is required' })
   @IsString()
   state!: string;
+
+  // Preferred Study Location & Budget
+  @IsOptional()
+  @IsString()
+  preferredState?: string | null;
+
+  @IsOptional()
+  @IsString()
+  preferredCity?: string | null;
+
+  @IsOptional()
+  @ValidateIf((o) => o.preferredBudget !== undefined && o.preferredBudget !== null && o.preferredBudget !== '')
+  @Type(() => Number)
+  @IsNumber({}, { message: 'Preferred budget must be a valid number' })
+  @Min(0, { message: 'Preferred budget must be non-negative' })
+  preferredBudget?: number | null;
+
+  @IsOptional()
+  @IsString()
+  referredBy?: string | null;
 
   @IsOptional()
   dateOfBirth?: Date;
@@ -196,6 +242,12 @@ export class CreateLeadDto {
   @IsArray()
   @IsString({ each: true })
   negativeColleges?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateCounsellingRequestItemDto)
+  counsellingRequests?: CreateCounsellingRequestItemDto[];
 
   @IsEnum(LeadSource)
   source!: LeadSource;

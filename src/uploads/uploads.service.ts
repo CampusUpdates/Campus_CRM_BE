@@ -2,8 +2,11 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { DataAssignmentStatus, DataUploadStatus, Prisma, CallOutcome } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import {
@@ -21,6 +24,28 @@ import type { Response } from 'express';
 
 function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function normalizePhone(p: string): string {
+  if (!p) return '';
+  const digits = String(p).replace(/\D/g, '');
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function getPhoneQueryCandidates(phones: Iterable<string>): string[] {
+  const candidates = new Set<string>();
+  for (const p of phones) {
+    if (!p) continue;
+    candidates.add(p);
+    const norm = normalizePhone(p);
+    if (norm.length >= 10) {
+      candidates.add(norm);
+      candidates.add(`+91${norm}`);
+      candidates.add(`91${norm}`);
+      candidates.add(`0${norm}`);
+    }
+  }
+  return Array.from(candidates);
 }
 
 function extractStudentFromRow(row: Record<string, any>): {
@@ -167,12 +192,112 @@ export class UploadedMulterFile {
 }
 
 @Injectable()
-export class UploadsService {
-  constructor(private readonly prisma: PrismaService) {}
+export class UploadsService implements OnModuleInit {
+  private readonly logger = new Logger(UploadsService.name);
+  private readonly activeProcessingUploadIds = new Set<string>();
 
-  async processFileUpload(file: UploadedMulterFile, userId: string) {
+  constructor(private readonly prisma: PrismaService) { }
+
+  async onModuleInit() {
+    // Run stale upload detection upon startup to recover any uploads left in PROCESSING
+    await this.recoverStaleUploads();
+  }
+
+  /**
+   * Cron job running every 5 minutes to sweep and fail abandoned PROCESSING records.
+   * If an upload has been PROCESSING for longer than 15 minutes and is not in activeProcessingUploadIds,
+   * it is marked as FAILED with a clear failureReason.
+   */
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async handleStaleUploadsCron() {
+    await this.recoverStaleUploads();
+  }
+
+  async recoverStaleUploads() {
+    try {
+      // Any upload in PROCESSING older than 15 minutes is considered abandoned
+      const staleThreshold = new Date(Date.now() - 15 * 60 * 1000);
+
+      const staleUploads = await this.prisma.dataUpload.findMany({
+        where: {
+          status: DataUploadStatus.PROCESSING,
+          uploadedAt: { lt: staleThreshold },
+        },
+        select: { id: true, fileName: true, uploadedAt: true },
+      });
+
+      for (const upload of staleUploads) {
+        // Double check it is not actively being processed in-memory right now
+        if (this.activeProcessingUploadIds.has(upload.id)) {
+          this.logger.debug(
+            `Upload ${upload.id} (${upload.fileName}) is still actively processing in memory. Skipping.`,
+          );
+          continue;
+        }
+
+        // Atomically update status to FAILED if still in PROCESSING
+        const updated = await this.prisma.dataUpload.updateMany({
+          where: {
+            id: upload.id,
+            status: DataUploadStatus.PROCESSING,
+          },
+          data: {
+            status: DataUploadStatus.FAILED,
+            failureReason: 'Processing timed out or abandoned before completion.',
+          },
+        });
+
+        if (updated.count > 0) {
+          this.logger.warn(
+            `Marked abandoned upload ${upload.id} (${upload.fileName}) as FAILED.`,
+          );
+        }
+      }
+    } catch (err: any) {
+      this.logger.error(`Error recovering stale uploads: ${err.message}`, err.stack);
+    }
+  }
+
+  async getCategories() {
+    return this.prisma.dataCategory.findMany({
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async createCategory(name: string) {
+    if (!name || name.trim() === '') {
+      throw new BadRequestException('Category name is required.');
+    }
+    const normalizedName = name.trim().toUpperCase();
+    const existing = await this.prisma.dataCategory.findUnique({
+      where: { name: normalizedName },
+    });
+    if (existing) return existing;
+
+    return this.prisma.dataCategory.create({
+      data: { name: normalizedName },
+    });
+  }
+
+  async processFileUpload(file: UploadedMulterFile, userId: string, categoryId: string) {
     if (!file || !file.buffer) {
       throw new BadRequestException('No file uploaded.');
+    }
+    if (!categoryId || typeof categoryId !== 'string' || categoryId.trim() === '') {
+      throw new BadRequestException('Category is required.');
+    }
+
+    const trimmedCategoryId = categoryId.trim();
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(trimmedCategoryId)) {
+      throw new BadRequestException(`Category with ID "${categoryId}" does not exist.`);
+    }
+
+    const category = await this.prisma.dataCategory.findUnique({
+      where: { id: trimmedCategoryId },
+    });
+    if (!category) {
+      throw new BadRequestException(`Category with ID "${categoryId}" does not exist.`);
     }
 
     const maxSizeBytes = 20 * 1024 * 1024; // 20 MB
@@ -198,12 +323,15 @@ export class UploadsService {
     const upload = await this.prisma.dataUpload.create({
       data: {
         uploadedById: userId,
+        categoryId: category.id,
         fileName: file.originalname,
         fileUrl,
         totalRecords: 0,
         status: 'PROCESSING',
       },
     });
+
+    this.activeProcessingUploadIds.add(upload.id);
 
     try {
       const workbook = XLSX.read(file.buffer, { type: 'buffer' });
@@ -228,6 +356,7 @@ export class UploadsService {
           seenPhones.add(rec.phone);
           validRecords.push({
             uploadId: upload.id,
+            categoryId: category.id,
             firstName: rec.firstName,
             middleName: rec.middleName || null,
             lastName: rec.lastName || null,
@@ -240,13 +369,110 @@ export class UploadsService {
       }
 
       if (validRecords.length === 0) {
+        const failureReason =
+          'No valid student records found in file. Required columns (First Name, Phone) are missing or records are empty.';
         await this.prisma.dataUpload.update({
           where: { id: upload.id },
-          data: { status: 'FAILED' },
+          data: { status: 'FAILED', failureReason },
         });
-        throw new BadRequestException(
-          'No valid student records found in file. Required columns (First Name, Phone) are missing or records are empty.',
+        throw new BadRequestException(failureReason);
+      }
+
+      const phoneCandidates = getPhoneQueryCandidates(seenPhones);
+      const existingStudents = await this.prisma.studentData.findMany({
+        where: { phone: { in: phoneCandidates } },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          phone: true,
+          email: true,
+          city: true,
+          state: true,
+          categoryId: true,
+          category: {
+            select: { id: true, name: true }
+          }
+        }
+      });
+
+      const duplicatesInfo: any[] = [];
+      const duplicatePhones = new Set<string>();
+
+      for (const r of validRecords) {
+        const rNorm = normalizePhone(r.phone);
+        const intra = existingStudents.find(
+          s => s.categoryId === category.id && (s.phone === r.phone || (rNorm && normalizePhone(s.phone) === rNorm))
         );
+        const cross = existingStudents.filter(
+          s => s.categoryId !== category.id && (s.phone === r.phone || (rNorm && normalizePhone(s.phone) === rNorm))
+        );
+
+        if (intra) {
+          duplicatePhones.add(r.phone);
+          duplicatesInfo.push({
+            incoming: r,
+            existing: {
+              id: intra.id,
+              firstName: intra.firstName,
+              lastName: intra.lastName,
+              phone: intra.phone,
+              email: intra.email,
+              city: intra.city,
+              state: intra.state,
+              categoryId: intra.categoryId,
+              categoryName: intra.category?.name || 'Current Category',
+              matchType: 'INTRA_CATEGORY',
+            },
+            matchType: 'INTRA_CATEGORY',
+            categoryName: intra.category?.name || 'Current Category',
+          });
+        } else if (cross.length > 0) {
+          duplicatePhones.add(r.phone);
+          const primary = cross[0];
+          const crossCategoryNames = Array.from(new Set(cross.map(c => c.category?.name || 'Uncategorized'))).join(', ');
+          duplicatesInfo.push({
+            incoming: r,
+            existing: {
+              id: primary.id,
+              firstName: `${primary.firstName} [${crossCategoryNames}]`,
+              lastName: primary.lastName,
+              phone: primary.phone,
+              email: primary.email,
+              city: primary.city,
+              state: primary.state,
+              categoryId: primary.categoryId,
+              categoryName: crossCategoryNames,
+              matchType: 'CROSS_CATEGORY',
+              allMatches: cross.map(c => ({
+                id: c.id,
+                name: [c.firstName, c.lastName].filter(Boolean).join(' '),
+                phone: c.phone,
+                categoryName: c.category?.name || 'Uncategorized'
+              }))
+            },
+            matchType: 'CROSS_CATEGORY',
+            categoryName: crossCategoryNames,
+          });
+        }
+      }
+
+      if (duplicatesInfo.length > 0) {
+        const intraCount = duplicatesInfo.filter(d => d.matchType === 'INTRA_CATEGORY').length;
+        const crossCount = duplicatesInfo.filter(d => d.matchType === 'CROSS_CATEGORY').length;
+        let message = `${duplicatesInfo.length} recurring records detected. Please review.`;
+        if (intraCount > 0 && crossCount > 0) {
+          message = `${duplicatesInfo.length} recurring records detected (${intraCount} in current category, ${crossCount} in other categories). Please review.`;
+        } else if (crossCount > 0) {
+          message = `${crossCount} recurring records detected in other categories. Please review.`;
+        }
+
+        return {
+          status: 'REQUIRES_REVIEW',
+          uploadId: upload.id,
+          duplicates: duplicatesInfo,
+          message,
+        };
       }
 
       await this.prisma.$transaction(
@@ -273,7 +499,7 @@ export class UploadsService {
             },
           });
         },
-        { timeout: 30000 },
+        { maxWait: 15000, timeout: 60000 },
       );
 
       return {
@@ -283,12 +509,14 @@ export class UploadsService {
         status: 'COMPLETED',
       };
     } catch (err: any) {
+      const failureReason =
+        err.message || 'Invalid or corrupted file contents during upload processing.';
       await this.prisma.dataUpload
         .update({
           where: { id: upload.id },
-          data: { status: 'FAILED' },
+          data: { status: 'FAILED', failureReason },
         })
-        .catch(() => {});
+        .catch(() => { });
 
       if (err instanceof BadRequestException) {
         throw err;
@@ -297,7 +525,281 @@ export class UploadsService {
       throw new BadRequestException(
         `Failed to process file: ${err.message || 'Invalid or corrupted file contents.'}`,
       );
+    } finally {
+      this.activeProcessingUploadIds.delete(upload.id);
     }
+  }
+
+  async confirmImport(uploadId: string, actions: Record<string, string>, userId: string) {
+    const upload = await this.prisma.dataUpload.findUnique({ where: { id: uploadId } });
+    if (!upload) throw new NotFoundException('Upload not found');
+    if (upload.status !== 'PROCESSING') throw new BadRequestException('Upload is not pending review');
+    if (!upload.categoryId) {
+      throw new BadRequestException('Cannot confirm import: Upload has no assigned category.');
+    }
+
+    this.activeProcessingUploadIds.add(upload.id);
+
+    try {
+      const filePath = path.join(process.cwd(), upload.fileUrl.replace(/^\//, ''));
+      if (!fs.existsSync(filePath)) {
+        throw new BadRequestException('Uploaded file no longer exists.');
+      }
+
+      const fileBuffer = fs.readFileSync(filePath);
+      const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const rawRows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+
+      const validRecords: any[] = [];
+      const seenPhones = new Set<string>();
+
+      for (const row of rawRows) {
+        const rec = extractStudentFromRow(row);
+        if (rec && !seenPhones.has(rec.phone)) {
+          seenPhones.add(rec.phone);
+          validRecords.push({
+            uploadId: upload.id,
+            categoryId: upload.categoryId,
+            firstName: rec.firstName,
+            middleName: rec.middleName || null,
+            lastName: rec.lastName || null,
+            phone: rec.phone,
+            email: rec.email || null,
+            city: rec.city || null,
+            state: rec.state || null,
+          });
+        }
+      }
+
+      const phoneCandidates = getPhoneQueryCandidates(seenPhones);
+      const existingStudents = await this.prisma.studentData.findMany({
+        where: { phone: { in: phoneCandidates } },
+        select: { id: true, firstName: true, lastName: true, phone: true, categoryId: true }
+      });
+
+      const intraMap = new Map<string, any>();
+      const crossMap = new Map<string, any[]>();
+
+      for (const s of existingStudents) {
+        const norm = normalizePhone(s.phone);
+        if (s.categoryId === upload.categoryId) {
+          intraMap.set(s.phone, s);
+          if (norm) intraMap.set(norm, s);
+        } else {
+          if (!crossMap.has(s.phone)) crossMap.set(s.phone, []);
+          crossMap.get(s.phone)!.push(s);
+          if (norm) {
+            if (!crossMap.has(norm)) crossMap.set(norm, []);
+            crossMap.get(norm)!.push(s);
+          }
+        }
+      }
+
+      const recordsToInsert: any[] = [];
+      const recordsToUpdate: any[] = [];
+      let existingKeptCount = 0;
+      let removedCount = 0;
+
+      for (const rec of validRecords) {
+        const recNorm = normalizePhone(rec.phone);
+        const isIntra = intraMap.has(rec.phone) || (recNorm ? intraMap.has(recNorm) : false);
+        const isCross = crossMap.has(rec.phone) || (recNorm ? crossMap.has(recNorm) : false);
+        const action = actions[rec.phone] || (recNorm ? actions[recNorm] : undefined) || 'KEEP_EXISTING';
+
+        if (isIntra) {
+          if (action === 'REPLACE') {
+            recordsToUpdate.push(rec);
+          } else if (action === 'KEEP_EXISTING') {
+            existingKeptCount++;
+          } else if (action === 'REMOVE') {
+            removedCount++;
+          }
+        } else if (isCross) {
+          if (action === 'REPLACE') {
+            // Authorized addition to the new category; existing other-category record untouched
+            recordsToInsert.push(rec);
+          } else if (action === 'KEEP_EXISTING') {
+            existingKeptCount++;
+          } else if (action === 'REMOVE') {
+            removedCount++;
+          }
+        } else {
+          recordsToInsert.push(rec);
+        }
+      }
+
+      await this.prisma.$transaction(async (tx) => {
+         if (recordsToInsert.length > 0) {
+           await tx.studentData.createMany({ data: recordsToInsert });
+         }
+         for (const rec of recordsToUpdate) {
+           await tx.studentData.updateMany({
+             where: { phone: rec.phone, categoryId: upload.categoryId },
+             data: {
+               firstName: rec.firstName,
+               middleName: rec.middleName,
+               lastName: rec.lastName,
+               email: rec.email,
+               city: rec.city,
+               state: rec.state,
+             }
+           });
+         }
+         const finalTotal = recordsToInsert.length + recordsToUpdate.length + existingKeptCount;
+         await tx.dataUpload.update({
+           where: { id: upload.id },
+           data: { status: 'COMPLETED', totalRecords: finalTotal }
+         });
+         await tx.activityLog.create({
+           data: {
+             userId,
+             activity: 'DATA_UPLOAD',
+             entityType: 'DATA_UPLOAD',
+             entityId: upload.id,
+             description: `Confirmed upload dataset "${upload.fileName}". Inserted ${recordsToInsert.length}, updated ${recordsToUpdate.length}.`,
+           },
+         });
+      }, { maxWait: 15000, timeout: 60000 });
+
+      return {
+        message: `Import confirmed successfully. Inserted: ${recordsToInsert.length}, Replaced: ${recordsToUpdate.length}, Skipped/Kept: ${existingKeptCount}, Removed: ${removedCount}.`,
+        status: 'COMPLETED'
+      };
+    } catch (err: any) {
+      const failureReason =
+        err.message || 'Error occurred while confirming and persisting imported records.';
+      await this.prisma.dataUpload.update({
+        where: { id: upload.id },
+        data: { status: 'FAILED', failureReason }
+      }).catch(() => {});
+      throw new BadRequestException('Failed to confirm import: ' + err.message);
+    } finally {
+      this.activeProcessingUploadIds.delete(upload.id);
+    }
+  }
+
+  async cancelImport(uploadId: string, userId: string) {
+    const upload = await this.prisma.dataUpload.findUnique({ where: { id: uploadId } });
+    if (!upload) throw new NotFoundException('Upload not found');
+
+    if (upload.status === 'PROCESSING') {
+      await this.prisma.dataUpload.update({
+        where: { id: uploadId },
+        data: {
+          status: 'FAILED',
+          failureReason: 'Review cancelled by user.',
+        },
+      });
+
+      await this.prisma.activityLog.create({
+        data: {
+          userId,
+          activity: 'DATA_UPLOAD',
+          entityType: 'DATA_UPLOAD',
+          entityId: upload.id,
+          description: `Cancelled import review for dataset "${upload.fileName}".`,
+        },
+      }).catch(() => {});
+    }
+
+    return { message: 'Import cancelled successfully.' };
+  }
+
+
+  async softDeleteUpload(id: string) {
+    const upload = await this.prisma.dataUpload.findUnique({ where: { id } });
+    if (!upload) throw new NotFoundException('Data upload not found.');
+
+    await this.prisma.dataUpload.update({
+      where: { id },
+      data: { isDeleted: true },
+    });
+    return { message: 'Dataset reference deleted successfully.' };
+  }
+
+  async previewHardDelete(id: string) {
+    const upload = await this.prisma.dataUpload.findUnique({ where: { id } });
+    if (!upload) throw new NotFoundException('Data upload not found.');
+
+    const students = await this.prisma.studentData.findMany({
+      where: { uploadId: id },
+      include: {
+        _count: {
+          select: { assignmentItems: true, callRecords: true }
+        }
+      }
+    });
+
+    let eligibleCount = 0;
+    let blockedCount = 0;
+
+    for (const s of students) {
+      if (s._count.assignmentItems > 0 || s._count.callRecords > 0) {
+        blockedCount++;
+      } else {
+        eligibleCount++;
+      }
+    }
+
+    return {
+      eligibleCount,
+      blockedCount,
+      totalCount: students.length,
+      message: blockedCount > 0
+        ? `Found ${blockedCount} records with protected relationships (assignments/calls) that cannot be deleted.`
+        : 'All records are eligible for deletion.'
+    };
+  }
+
+  async hardDeleteUploadRecords(id: string, userId: string) {
+    const upload = await this.prisma.dataUpload.findUnique({ where: { id } });
+    if (!upload) throw new NotFoundException('Data upload not found.');
+
+    const students = await this.prisma.studentData.findMany({
+      where: { uploadId: id },
+      include: {
+        _count: {
+          select: { assignmentItems: true, callRecords: true }
+        }
+      }
+    });
+
+    const eligibleIds = students
+      .filter(s => s._count.assignmentItems === 0 && s._count.callRecords === 0)
+      .map(s => s.id);
+
+    if (eligibleIds.length === 0) {
+      throw new BadRequestException('No eligible records found for hard deletion. Protected relationships prevent deletion.');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.studentData.deleteMany({
+        where: { id: { in: eligibleIds } }
+      });
+
+      const remainingCount = students.length - eligibleIds.length;
+      await tx.dataUpload.update({
+        where: { id },
+        data: { totalRecords: remainingCount }
+      });
+
+      await tx.activityLog.create({
+        data: {
+          userId,
+          activity: 'DATA_UPLOAD',
+          entityType: 'DATA_UPLOAD',
+          entityId: upload.id,
+          description: `Hard deleted ${eligibleIds.length} eligible student records from dataset.`,
+        },
+      });
+    }, { maxWait: 10000, timeout: 30000 });
+
+    return {
+      message: `Permanently deleted ${eligibleIds.length} student records.`,
+      deletedCount: eligibleIds.length
+    };
   }
 
   async findAllUploads(page: number = 1, limit: number = 10) {
@@ -307,6 +809,7 @@ export class UploadsService {
 
     const [data, total] = await Promise.all([
       this.prisma.dataUpload.findMany({
+        where: { isDeleted: false },
         skip,
         take: l,
         orderBy: { uploadedAt: 'desc' },
@@ -327,7 +830,7 @@ export class UploadsService {
           },
         },
       }),
-      this.prisma.dataUpload.count(),
+      this.prisma.dataUpload.count({ where: { isDeleted: false } }),
     ]);
 
     return {
@@ -545,6 +1048,206 @@ export class UploadsService {
     }
   }
 
+  parseDateRangeFilter(
+    time?: string,
+    fromDate?: string,
+    toDate?: string,
+  ): Prisma.DateTimeFilter | null {
+    const rawTime = (time || '').toLowerCase().trim();
+    if (!rawTime && !fromDate && !toDate) return null;
+    if (rawTime === 'all') return null;
+
+    const now = new Date();
+
+    if (rawTime === 'today') {
+      const startOfToday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        0,
+        0,
+        0,
+        0,
+      );
+      const endOfToday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        23,
+        59,
+        59,
+        999,
+      );
+      return { gte: startOfToday, lte: endOfToday };
+    }
+
+    if (rawTime === 'yesterday') {
+      const startOfYesterday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 1,
+        0,
+        0,
+        0,
+        0,
+      );
+      const endOfYesterday = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 1,
+        23,
+        59,
+        59,
+        999,
+      );
+      return { gte: startOfYesterday, lte: endOfYesterday };
+    }
+
+    if (rawTime === 'this_week' || rawTime === 'week') {
+      // Monday through Sunday
+      const day = now.getDay();
+      const diffToMonday = (day === 0 ? -6 : 1) - day;
+      const startOfWeek = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + diffToMonday,
+        0,
+        0,
+        0,
+        0,
+      );
+      const endOfWeek = new Date(
+        startOfWeek.getFullYear(),
+        startOfWeek.getMonth(),
+        startOfWeek.getDate() + 6,
+        23,
+        59,
+        59,
+        999,
+      );
+      return { gte: startOfWeek, lte: endOfWeek };
+    }
+
+    if (rawTime === 'this_month' || rawTime === 'month') {
+      const startOfMonth = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        1,
+        0,
+        0,
+        0,
+        0,
+      );
+      const endOfMonth = new Date(
+        now.getFullYear(),
+        now.getMonth() + 1,
+        0,
+        23,
+        59,
+        59,
+        999,
+      );
+      return { gte: startOfMonth, lte: endOfMonth };
+    }
+
+    if (rawTime === 'this_year' || rawTime === 'year') {
+      const startOfYear = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+      const endOfYear = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+      return { gte: startOfYear, lte: endOfYear };
+    }
+
+    if (rawTime === 'custom' || fromDate || toDate) {
+      let startCustom: Date | null = null;
+      let endCustom: Date | null = null;
+
+      if (fromDate) {
+        const fromStr = String(fromDate).trim();
+        if (fromStr.includes('-') && !fromStr.includes('T')) {
+          const parts = fromStr.split('-').map((p) => parseInt(p, 10));
+          if (
+            parts.length >= 3 &&
+            !isNaN(parts[0]) &&
+            !isNaN(parts[1]) &&
+            !isNaN(parts[2])
+          ) {
+            startCustom = new Date(
+              parts[0],
+              parts[1] - 1,
+              parts[2],
+              0,
+              0,
+              0,
+              0,
+            );
+          }
+        }
+        if (!startCustom) {
+          const parsedFrom = new Date(fromStr);
+          if (!isNaN(parsedFrom.getTime())) {
+            startCustom = new Date(
+              parsedFrom.getFullYear(),
+              parsedFrom.getMonth(),
+              parsedFrom.getDate(),
+              0,
+              0,
+              0,
+              0,
+            );
+          }
+        }
+      }
+
+      if (toDate) {
+        const toStr = String(toDate).trim();
+        if (toStr.includes('-') && !toStr.includes('T')) {
+          const parts = toStr.split('-').map((p) => parseInt(p, 10));
+          if (
+            parts.length >= 3 &&
+            !isNaN(parts[0]) &&
+            !isNaN(parts[1]) &&
+            !isNaN(parts[2])
+          ) {
+            endCustom = new Date(
+              parts[0],
+              parts[1] - 1,
+              parts[2],
+              23,
+              59,
+              59,
+              999,
+            );
+          }
+        }
+        if (!endCustom) {
+          const parsedTo = new Date(toStr);
+          if (!isNaN(parsedTo.getTime())) {
+            endCustom = new Date(
+              parsedTo.getFullYear(),
+              parsedTo.getMonth(),
+              parsedTo.getDate(),
+              23,
+              59,
+              59,
+              999,
+            );
+          }
+        }
+      }
+
+      if (startCustom && endCustom) {
+        return { gte: startCustom, lte: endCustom };
+      }
+      if (startCustom) {
+        return { gte: startCustom };
+      }
+      if (endCustom) {
+        return { lte: endCustom };
+      }
+    }
+
+    return null;
+  }
+
   async findFilteredStudentData(filterDto: FilterStudentDataDto) {
     const page = Number(filterDto.page) || 1;
     const limit = Number(filterDto.limit) || 50;
@@ -554,6 +1257,9 @@ export class UploadsService {
     const assignedWhere = this.getAssignedStudentDataCondition();
 
     const baseConditions: any[] = [];
+
+    // Ensure we only show records from active datasets
+    baseConditions.push({ upload: { isDeleted: false } });
 
     if (filterDto.states && filterDto.states.length > 0) {
       baseConditions.push({ state: { in: filterDto.states } });
@@ -565,6 +1271,16 @@ export class UploadsService {
 
     if (filterDto.uploadIds && filterDto.uploadIds.length > 0) {
       baseConditions.push({ uploadId: { in: filterDto.uploadIds } });
+    }
+
+    // Date filtering on `createdAt` (record date)
+    const dateWhere = this.parseDateRangeFilter(
+      filterDto.time,
+      filterDto.fromDate,
+      filterDto.toDate,
+    );
+    if (dateWhere) {
+      baseConditions.push({ createdAt: dateWhere });
     }
 
     if (filterDto.search && filterDto.search.trim()) {
@@ -626,8 +1342,7 @@ export class UploadsService {
             select: { id: true, fileName: true, uploadedAt: true },
           },
           callRecords: {
-            take: 1,
-            orderBy: { createdAt: 'desc' },
+            orderBy: { createdAt: 'asc' },
             select: {
               id: true,
               outcome: true,
@@ -689,7 +1404,7 @@ export class UploadsService {
         where: { city: { not: null } },
       }),
       this.prisma.dataUpload.findMany({
-        where: { status: DataUploadStatus.COMPLETED },
+        where: { status: DataUploadStatus.COMPLETED, isDeleted: false },
         select: { id: true, fileName: true },
         orderBy: { uploadedAt: 'desc' },
       }),
@@ -719,6 +1434,7 @@ export class UploadsService {
       filterOptions: {
         states: distinctStates.map((s) => s.state).filter(Boolean) as string[],
         cities: distinctCities.map((c) => c.city).filter(Boolean) as string[],
+        cityOptionsWithState: distinctCities.filter((c) => Boolean(c.city)) as { city: string; state: string | null }[],
         uploads: uploadsList,
       },
     };
@@ -839,6 +1555,9 @@ export class UploadsService {
     ) {
       const filterDto = filters || new FilterStudentDataDto();
       const baseConditions: any[] = [];
+
+      // Ensure we only select records from active datasets
+      baseConditions.push({ upload: { isDeleted: false } });
 
       if (filterDto.states && filterDto.states.length > 0) {
         baseConditions.push({ state: { in: filterDto.states } });
@@ -983,7 +1702,7 @@ export class UploadsService {
           expiryTimeFormatted: 'Permanent',
         };
       },
-      { timeout: 30000 },
+      { maxWait: 15000, timeout: 60000 },
     );
   }
 
@@ -1178,6 +1897,34 @@ export class UploadsService {
       },
     });
 
+    // Collect all assignment IDs so we can query contacted counts in one go
+    const assignmentIds = assignments.map((a) => a.id);
+
+    // Single efficient query: for each assignment, count distinct studentDataIds
+    // that have at least one CallRecord. Uses Prisma raw query to perform
+    // COUNT(DISTINCT) at the database level — no N+1, no in-memory calculation.
+    const contactedCountRows: { dataAssignmentId: string; contactedRecords: bigint }[] =
+      assignmentIds.length > 0
+        ? await this.prisma.$queryRaw`
+            SELECT
+              dai."dataAssignmentId",
+              COUNT(DISTINCT cr."studentDataId")::int AS "contactedRecords"
+            FROM "DataAssignmentItem" dai
+            INNER JOIN "CallRecord" cr ON cr."studentDataId" = dai."studentDataId"
+            WHERE dai."dataAssignmentId" = ANY(${assignmentIds}::uuid[])
+            GROUP BY dai."dataAssignmentId"
+          `
+        : [];
+
+    // Build a lookup map: assignmentId -> contactedRecords
+    const contactedCountMap = new Map<string, number>();
+    for (const row of contactedCountRows) {
+      contactedCountMap.set(
+        row.dataAssignmentId,
+        Number(row.contactedRecords),
+      );
+    }
+
     const uploadFileNames = new Set<string>();
     let totalAssignedRecords = 0;
 
@@ -1197,6 +1944,7 @@ export class UploadsService {
         id: a.id,
         fileName,
         recordsCount: itemCount,
+        contactedRecords: contactedCountMap.get(a.id) ?? 0,
         assignedAt: a.assignedAt.toISOString(),
         expiresAt: a.expiresAt.toISOString(),
         status: a.status,
@@ -1252,11 +2000,7 @@ export class UploadsService {
             studentData: {
               include: {
                 callRecords: {
-                  orderBy: [
-                    { startedAt: 'desc' },
-                    { createdAt: 'desc' },
-                  ],
-                  take: 1,
+                  orderBy: { createdAt: 'asc' },
                   include: {
                     createdBy: {
                       select: {
@@ -1294,7 +2038,29 @@ export class UploadsService {
       totalRecords: assignment.items.length,
       items: assignment.items.map((item) => {
         const student = item.studentData;
-        const latestCall = student.callRecords[0] || null;
+        const allCalls = student.callRecords || [];
+        const latestCall = allCalls.length > 0 ? allCalls[allCalls.length - 1] : null;
+
+        const remarks = allCalls.map((call) => ({
+          id: call.id,
+          outcome: call.outcome,
+          notes: call.notes || '',
+          startedAt: call.startedAt,
+          endedAt: call.endedAt,
+          durationSeconds: call.durationSeconds,
+          createdAt: call.createdAt,
+          author: call.createdBy
+            ? `${call.createdBy.firstName} ${call.createdBy.lastName || ''}`.trim()
+            : 'Unknown',
+          createdBy: call.createdBy
+            ? {
+                id: call.createdBy.id,
+                firstName: call.createdBy.firstName,
+                lastName: call.createdBy.lastName,
+                email: call.createdBy.email,
+              }
+            : null,
+        }));
 
         return {
           id: item.id,
@@ -1307,24 +2073,25 @@ export class UploadsService {
           city: student.city,
           state: student.state,
           createdAt: student.createdAt,
+          remarks,
           recentCall: latestCall
             ? {
-                id: latestCall.id,
-                outcome: latestCall.outcome,
-                notes: latestCall.notes,
-                startedAt: latestCall.startedAt,
-                endedAt: latestCall.endedAt,
-                durationSeconds: latestCall.durationSeconds,
-                createdAt: latestCall.createdAt,
-                createdBy: latestCall.createdBy
-                  ? {
-                      id: latestCall.createdBy.id,
-                      firstName: latestCall.createdBy.firstName,
-                      lastName: latestCall.createdBy.lastName,
-                      email: latestCall.createdBy.email,
-                    }
-                  : null,
-              }
+              id: latestCall.id,
+              outcome: latestCall.outcome,
+              notes: latestCall.notes,
+              startedAt: latestCall.startedAt,
+              endedAt: latestCall.endedAt,
+              durationSeconds: latestCall.durationSeconds,
+              createdAt: latestCall.createdAt,
+              createdBy: latestCall.createdBy
+                ? {
+                  id: latestCall.createdBy.id,
+                  firstName: latestCall.createdBy.firstName,
+                  lastName: latestCall.createdBy.lastName,
+                  email: latestCall.createdBy.email,
+                }
+                : null,
+            }
             : null,
         };
       }),
@@ -1442,7 +2209,7 @@ export class UploadsService {
         assignmentId,
         reclaimedRecordsCount: recordsCount,
       };
-    });
+    }, { maxWait: 10000, timeout: 30000 });
   }
 
   async reclaimAdvisorData(
@@ -1544,7 +2311,7 @@ export class UploadsService {
         reclaimedRecordsCount: totalRecordsCount,
         advisorId,
       };
-    });
+    }, { maxWait: 10000, timeout: 30000 });
   }
 
   async reclaimAllAdvisorData(managerId: string, roleId: number) {
@@ -1659,7 +2426,7 @@ export class UploadsService {
         reclaimedAssignmentsCount: activeAssignments.length,
         reclaimedRecordsCount: totalRecordsCount,
       };
-    });
+    }, { maxWait: 10000, timeout: 30000 });
   }
 
   async exportDatasetResponseHistory(
@@ -1667,6 +2434,9 @@ export class UploadsService {
     res: Response,
     disposition?: string,
     calledById?: string,
+    time?: string,
+    fromDate?: string,
+    toDate?: string,
   ) {
     const upload = await this.prisma.dataUpload.findUnique({
       where: { id: uploadId },
@@ -1678,6 +2448,11 @@ export class UploadsService {
     }
 
     const whereCondition: Prisma.StudentDataWhereInput = { uploadId };
+
+    const dateWhere = this.parseDateRangeFilter(time, fromDate, toDate);
+    if (dateWhere) {
+      whereCondition.createdAt = dateWhere;
+    }
 
     const hasDispFilter = disposition && disposition !== 'ALL';
     const hasCallerFilter = calledById && calledById !== 'ALL';
@@ -1769,6 +2544,7 @@ export class UploadsService {
       CALL_BACK_LATER: 'Call Back Later',
       INTERESTED: 'Interested',
       DISCONNECTED: 'Disconnected',
+      OTHER: 'Other',
     };
 
     const rows = students.map((student) => {

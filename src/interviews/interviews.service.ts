@@ -6,7 +6,7 @@ import { UpdateInterviewDto } from './dto/update-interview.dto';
 
 @Injectable()
 export class InterviewsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   async create(createInterviewDto: CreateInterviewDto) {
     const candidate = await this.prisma.candidate.findUnique({

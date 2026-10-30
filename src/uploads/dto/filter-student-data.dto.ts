@@ -111,6 +111,18 @@ export class FilterStudentDataDto {
   @IsString({ each: true })
   notCalledByUserIds?: string[];
 
+  @IsOptional()
+  @IsString()
+  time?: string;
+
+  @IsOptional()
+  @IsString()
+  fromDate?: string;
+
+  @IsOptional()
+  @IsString()
+  toDate?: string;
+
 
   @IsOptional()
   @Type(() => Number)

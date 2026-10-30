@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "CallOutcome" ADD VALUE IF NOT EXISTS 'OTHER';

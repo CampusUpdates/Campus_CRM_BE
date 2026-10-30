@@ -12,9 +12,12 @@ import {
   ValidateIf,
   IsNotEmpty,
   Matches,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 import { CourseType, Gender, LeadSource } from '@prisma/client';
+import { CreateCounsellingRequestItemDto } from './create-lead.dto';
 
 export class UpdateLeadDto {
   @IsOptional()
@@ -31,10 +34,12 @@ export class UpdateLeadDto {
 
   @IsOptional()
   @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Phone number must be exactly 10 digits' })
   phone?: string;
 
   @IsOptional()
   @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Alternate phone number must be exactly 10 digits' })
   alternatePhone?: string;
 
   @IsOptional()
@@ -55,6 +60,26 @@ export class UpdateLeadDto {
   @IsOptional()
   @IsString()
   state?: string;
+
+  // Preferred Study Location & Budget
+  @IsOptional()
+  @IsString()
+  preferredState?: string | null;
+
+  @IsOptional()
+  @IsString()
+  preferredCity?: string | null;
+
+  @IsOptional()
+  @ValidateIf((o) => o.preferredBudget !== undefined && o.preferredBudget !== null && o.preferredBudget !== '')
+  @Type(() => Number)
+  @IsNumber({}, { message: 'Preferred budget must be a valid number' })
+  @Min(0, { message: 'Preferred budget must be non-negative' })
+  preferredBudget?: number | null;
+
+  @IsOptional()
+  @IsString()
+  referredBy?: string | null;
 
   @IsOptional()
   @IsNumber()
@@ -98,6 +123,12 @@ export class UpdateLeadDto {
   @IsArray()
   @IsString({ each: true })
   negativeColleges?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateCounsellingRequestItemDto)
+  counsellingRequests?: CreateCounsellingRequestItemDto[];
 
   // Family Information
   @IsOptional()

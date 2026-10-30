@@ -6,7 +6,7 @@ import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-req
 @Controller('dashboard')
 @UseGuards(JwtAuthGuard)
 export class DashboardController {
-  constructor(private readonly dashboardService: DashboardService) {}
+  constructor(private readonly dashboardService: DashboardService) { }
 
   @Get('hr')
   getHRDashboardStats(@Req() req: AuthenticatedRequest) {
@@ -14,8 +14,18 @@ export class DashboardController {
   }
 
   @Get('advisor')
-  getAdvisorDashboardStats(@Req() req: AuthenticatedRequest) {
-    return this.dashboardService.getAdvisorDashboardStats(req.user.sub);
+  getAdvisorDashboardStats(
+    @Req() req: AuthenticatedRequest,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('period') period?: string,
+  ) {
+    return this.dashboardService.getAdvisorDashboardStats(
+      req.user.sub,
+      startDate,
+      endDate,
+      period,
+    );
   }
 
   @Get('manager')
@@ -47,6 +57,7 @@ export class DashboardController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('callTime') callTime?: string,
+    @Query('callTiming') callTiming?: string,
   ) {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
@@ -57,9 +68,15 @@ export class DashboardController {
       pageNum,
       limitNum,
       callTime,
+      callTiming,
     );
   }
 
+
+  @Get('team-lead')
+  getTeamLeadDashboardStats(@Req() req: AuthenticatedRequest) {
+    return this.dashboardService.getTeamLeadDashboardStats(req.user.sub);
+  }
 
   @Get('admissions')
   getAdmissionsDashboardStats(
@@ -87,5 +104,26 @@ export class DashboardController {
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 10,
     });
+  }
+
+  @Get('metric-students')
+  getDashboardMetricStudents(
+    @Req() req: AuthenticatedRequest,
+    @Query('metric') metric: string,
+    @Query('teamId') teamId?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const pageNum = page ? parseInt(page, 10) : 1;
+    const limitNum = limit ? parseInt(limit, 10) : 20;
+    return this.dashboardService.getDashboardMetricStudents(
+      req.user.sub,
+      metric,
+      teamId,
+      search,
+      pageNum,
+      limitNum,
+    );
   }
 }

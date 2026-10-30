@@ -115,6 +115,17 @@ model User {
   teamLeads                   TeamLead[]              @relation("TeamLeadUser")
   advisors                    TeamLeadAdvisor[]       @relation("TeamLeadAdvisors")
   teamLeadAdvisors            TeamLeadAdvisor[]       @relation("AdvisorTeamLeads")
+  passwordResetTokens         PasswordResetToken[]
+  tpcCallsMade                TPCCall[]               @relation("TPCCaller")
+  createdBroadcasts           BroadcastMessage[]      @relation("BroadcastCreator")
+  receivedBroadcasts          BroadcastRecipient[]    @relation("BroadcastRecipientUser")
+  counsellingRequestsRequested CollegeCounsellingRequest[] @relation("CounsellingRequestedBy")
+  counsellingRequestsScheduled CollegeCounsellingRequest[] @relation("CounsellingScheduledBy")
+  counsellingRequestsCompleted CollegeCounsellingRequest[] @relation("CounsellingCompletedBy")
+  leadAcknowledgementsReceived LeadAcknowledgement[] @relation("LeadAckRecipient")
+  leadAcknowledgementsConfirmed LeadAcknowledgement[] @relation("LeadAckAcknowledger")
+  leadAcknowledgementsShared   LeadAcknowledgement[] @relation("LeadAckSharer")
+  moduleReadStates            UserModuleReadState[]
 }
 
 model TeamLead {
@@ -186,6 +197,8 @@ model College {
   courses            Course[]
   finalEnrolledLeads Lead[]              @relation("FinalCollege")
   leadApplications   LeadCollege[]
+  counsellingRequests CollegeCounsellingRequest[]
+  leadAcknowledgements LeadAcknowledgement[]
 
   @@index([approvedById])
 }
@@ -219,6 +232,10 @@ model Lead {
   dateOfBirth              DateTime?   @db.Date
   city                     String?
   state                    String?
+  preferredState           String?
+  preferredCity            String?
+  preferredBudget          Decimal?    @db.Decimal(10, 2)
+  referredBy               String?
   tenthPercentage          Float?
   twelfthPercentage        Float?
   graduationPercentage     Float?
@@ -276,6 +293,8 @@ model Lead {
   ownershipHistories  LeadOwnershipHistory[]
   tpcs                TPC[]
   callRecords         CallRecord[]
+  counsellingRequests CollegeCounsellingRequest[]
+  acknowledgements    LeadAcknowledgement[]
 
   @@index([statusId])
   @@index([createdById])
@@ -323,6 +342,7 @@ model LeadCollege {
   interviews            LeadCollegeInterview[]
   payments              LeadCollegePayment[]
   selectionLetters      SelectionLetter[]
+  counsellingRequests   CollegeCounsellingRequest[]
 
   @@unique([leadId, collegeId])
   @@index([leadId])
@@ -343,6 +363,45 @@ model LeadNegativeCollege {
   lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
 
   @@index([leadId])
+}
+
+model CollegeCounsellingRequest {
+  id               String            @id @default(uuid()) @db.Uuid
+  leadId           String            @db.Uuid
+  collegeId        String            @db.Uuid
+  leadCollegeId    String?           @db.Uuid
+  preferredDate    DateTime?         @db.Date
+  preferredTime    String?
+  preferredTiming  String?
+  purpose          String?           @db.Text
+  status           CounsellingStatus @default(REQUESTED)
+  counsellingDate  DateTime?         @db.Date
+  scheduledDate    DateTime?         @db.Date
+  scheduledTime    String?
+  counsellingNotes String?           @db.Text
+  completionRemark String?           @db.Text
+  requestedById    String            @db.Uuid
+  requestedAt      DateTime          @default(now())
+  scheduledById    String?           @db.Uuid
+  scheduledAt      DateTime?
+  completedById    String?           @db.Uuid
+  completedAt      DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  lead             Lead              @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  college          College           @relation(fields: [collegeId], references: [id], onDelete: Restrict)
+  leadCollege      LeadCollege?      @relation(fields: [leadCollegeId], references: [id], onDelete: SetNull)
+  requestedBy      User              @relation("CounsellingRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  scheduledBy      User?             @relation("CounsellingScheduledBy", fields: [scheduledById], references: [id], onDelete: Restrict)
+  completedBy      User?             @relation("CounsellingCompletedBy", fields: [completedById], references: [id], onDelete: Restrict)
+
+  @@index([leadId])
+  @@index([collegeId])
+  @@index([status])
+  @@index([requestedById])
+  @@index([scheduledById])
+  @@index([completedById])
 }
 
 model Interaction {
@@ -395,17 +454,34 @@ model TPCUser {
   completedById String?       @db.Uuid
   assignedAt    DateTime      @default(now())
   completedAt   DateTime?
+  attempts      Int           @default(0)
   status        TPCUserStatus @default(PENDING)
   createdAt     DateTime      @default(now())
   assignedBy    User          @relation("TPCAssignedBy", fields: [assignedById], references: [id])
   assignedTo    User          @relation("TPCAssignedTo", fields: [assignedToId], references: [id])
   completedBy   User?         @relation("TPCCompletedBy", fields: [completedById], references: [id])
   tpc           TPC           @relation(fields: [tpcId], references: [id], onDelete: Cascade)
+  calls         TPCCall[]
 
   @@index([tpcId])
   @@index([assignedById])
   @@index([assignedToId])
   @@index([completedById])
+}
+
+model TPCCall {
+  id        String      @id @default(uuid()) @db.Uuid
+  tpcUserId String      @db.Uuid
+  callerId  String      @db.Uuid
+  outcome   CallOutcome
+  notes     String?
+  createdAt DateTime    @default(now())
+
+  tpcUser TPCUser @relation(fields: [tpcUserId], references: [id], onDelete: Cascade)
+  caller  User    @relation("TPCCaller", fields: [callerId], references: [id])
+
+  @@index([tpcUserId])
+  @@index([callerId])
 }
 
 model Position {
@@ -460,20 +536,26 @@ model Interview {
 model DataUpload {
   id           String           @id @default(uuid()) @db.Uuid
   uploadedById String           @db.Uuid
+  categoryId   String?          @db.Uuid
   fileName     String
   fileUrl      String
   totalRecords Int
   status       DataUploadStatus @default(PROCESSING)
-  uploadedAt   DateTime         @default(now())
-  uploadedBy   User             @relation("DataUploader", fields: [uploadedById], references: [id])
-  studentData  StudentData[]
+  isDeleted     Boolean          @default(false)
+  failureReason String?
+  uploadedAt    DateTime         @default(now())
+  uploadedBy    User             @relation("DataUploader", fields: [uploadedById], references: [id])
+  category      DataCategory?    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  studentData   StudentData[]
 
   @@index([uploadedById])
+  @@index([categoryId])
 }
 
 model StudentData {
   id              String               @id @default(uuid()) @db.Uuid
   uploadId        String               @db.Uuid
+  categoryId      String?              @db.Uuid
   firstName       String
   middleName      String?
   lastName        String?
@@ -484,9 +566,11 @@ model StudentData {
   createdAt       DateTime             @default(now())
   assignmentItems DataAssignmentItem[]
   upload          DataUpload           @relation(fields: [uploadId], references: [id])
+  category        DataCategory?        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   callRecords     CallRecord[]
 
   @@index([uploadId])
+  @@index([categoryId])
   @@index([phone])
 }
 
@@ -767,6 +851,12 @@ enum LeadAssignmentStatus {
   CANCELLED
 }
 
+enum CounsellingStatus {
+  REQUESTED
+  SCHEDULED
+  COMPLETED
+}
+
 enum CollegeStatus {
   PENDING
   APPROVED
@@ -789,6 +879,7 @@ enum LeadSource {
   IBSAT
   SNAP
   OTHER
+  REFERENCE
 }
 
 enum Gender {
@@ -845,6 +936,7 @@ enum InterviewResult {
 
 enum DataUploadStatus {
   PROCESSING
+
   COMPLETED
   FAILED
 }
@@ -935,6 +1027,7 @@ enum CallOutcome {
   INTERESTED
   DISCONNECTED
   DROP
+  OTHER
 }
 
 model CallRecord {
@@ -957,4 +1050,110 @@ model CallRecord {
   @@index([leadId])
   @@index([createdById])
   @@index([createdAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model DataCategory {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String        @unique
+  description String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  uploads     DataUpload[]
+  studentData StudentData[]
+}
+
+model BroadcastMessage {
+  id            String               @id @default(uuid()) @db.Uuid
+  title         String
+  body          String
+  createdById   String               @db.Uuid
+  status        String               @default("SENT") // SENT, DRAFT, ARCHIVED
+  targetRoles   Int[]                @default([])
+  targetTeams   Int[]                @default([])
+  targetUserIds String[]             @default([])
+  targetAll     Boolean              @default(false)
+  createdAt     DateTime             @default(now())
+  sentAt        DateTime?            @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  createdBy     User                 @relation("BroadcastCreator", fields: [createdById], references: [id])
+  recipients    BroadcastRecipient[]
+
+  @@index([createdById])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model BroadcastRecipient {
+  id             String           @id @default(uuid()) @db.Uuid
+  broadcastId    String           @db.Uuid
+  userId         String           @db.Uuid
+  deliveredAt    DateTime         @default(now())
+  readAt         DateTime?
+  acknowledgedAt DateTime?
+  createdAt      DateTime         @default(now())
+
+  broadcast      BroadcastMessage @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  user           User             @relation("BroadcastRecipientUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([broadcastId, userId])
+  @@index([broadcastId])
+  @@index([userId])
+  @@index([readAt])
+  @@index([acknowledgedAt])
+}
+
+model LeadAcknowledgement {
+  id               String    @id @default(uuid()) @db.Uuid
+  leadId           String    @db.Uuid
+  recipientId      String    @db.Uuid
+  collegeId        String?   @db.Uuid
+  status           String    @default("PENDING")
+  acknowledgedById String?   @db.Uuid
+  acknowledgedAt   DateTime?
+  sharedById       String?   @db.Uuid
+  sharedAt         DateTime?
+  channel          String?
+  context          String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  lead             Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  recipient        User      @relation("LeadAckRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  college          College?  @relation(fields: [collegeId], references: [id], onDelete: SetNull)
+  acknowledgedBy   User?     @relation("LeadAckAcknowledger", fields: [acknowledgedById], references: [id], onDelete: SetNull)
+  sharedBy         User?     @relation("LeadAckSharer", fields: [sharedById], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@index([recipientId])
+  @@index([collegeId])
+  @@index([acknowledgedAt])
+  @@index([status])
+}
+
+model UserModuleReadState {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  module     String
+  lastSeenAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, module])
+  @@index([userId])
 }

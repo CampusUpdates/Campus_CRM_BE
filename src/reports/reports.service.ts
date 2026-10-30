@@ -370,38 +370,333 @@ export class ReportsService {
       }
     }
 
-    // College Filter
-    if (filters.collegeId && filters.collegeId !== 'ALL') {
-      andConditions.push({
-        collegeApplications: {
-          some: {
-            OR: [
-              { collegeId: filters.collegeId },
-              { college: { id: filters.collegeId } },
-            ],
-          },
-        },
-      });
+    // College and Lead Stage Filters
+    const hasCollege = Boolean(filters.collegeId && filters.collegeId !== 'ALL');
+    const hasStatus = Boolean(filters.statusId && filters.statusId !== 'ALL');
+    const collegeIdVal = hasCollege ? filters.collegeId! : null;
+
+    let statusIdNum: number | null = null;
+    let statusNameUpper = '';
+    if (hasStatus) {
+      const parsed = parseInt(filters.statusId!, 10);
+      if (!isNaN(parsed)) {
+        statusIdNum = parsed;
+      }
+      statusNameUpper = filters.statusId!.trim().toUpperCase();
     }
 
     // Member Filter
     if (filters.memberId && filters.memberId !== 'ALL') {
       andConditions.push({
-        assignments: {
-          some: {
-            userId: filters.memberId,
-            status: 'ACTIVE',
+        OR: [
+          {
+            assignments: {
+              some: {
+                userId: filters.memberId,
+                status: 'ACTIVE',
+              },
+            },
           },
-        },
+          {
+            AND: [
+              { assignments: { none: { status: 'ACTIVE' } } },
+              { createdById: filters.memberId },
+            ],
+          },
+        ],
       });
     }
 
-    // Lead Stage Filter
-    if (filters.statusId && filters.statusId !== 'ALL') {
-      const statusIdNum = parseInt(filters.statusId, 10);
-      if (!isNaN(statusIdNum)) {
+    if (hasCollege && hasStatus) {
+      // Both college and status filter applied: MUST match on the SAME college application!
+      if (statusIdNum === 1 || statusNameUpper === 'LEAD') {
+        // Rule 2: A student who has reached APPLICATION must still count in LEAD because the student originally entered the pipeline as a lead.
+        // Any student pitched this college entered as a lead for this college!
         andConditions.push({
-          OR: [{ statusId: statusIdNum }, { status: { id: statusIdNum } }],
+          OR: [
+            { collegeApplications: { some: { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] } } },
+            { finalCollegeId: collegeIdVal },
+          ],
+        });
+      } else if (statusIdNum === 2 || statusNameUpper === 'APPLICATION') {
+        andConditions.push({
+          collegeApplications: {
+            some: {
+              AND: [
+                { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] },
+                { OR: [{ statusId: 2 }, { status: { name: { equals: 'APPLICATION', mode: 'insensitive' } } }] },
+                { isCancelled: false },
+              ],
+            },
+          },
+        });
+      } else if (statusIdNum === 3 || statusNameUpper === 'INTERVIEW_SCHEDULED') {
+        andConditions.push({
+          collegeApplications: {
+            some: {
+              AND: [
+                { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] },
+                {
+                  OR: [
+                    { statusId: 3 },
+                    { status: { name: { equals: 'INTERVIEW_SCHEDULED', mode: 'insensitive' } } },
+                    { interviews: { some: { status: 'SCHEDULED' } } },
+                  ],
+                },
+                { isCancelled: false },
+              ],
+            },
+          },
+        });
+      } else if (statusIdNum === 4 || statusNameUpper === 'INTERVIEW_DONE') {
+        andConditions.push({
+          collegeApplications: {
+            some: {
+              AND: [
+                { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] },
+                {
+                  OR: [
+                    { statusId: 4 },
+                    { status: { name: { equals: 'INTERVIEW_DONE', mode: 'insensitive' } } },
+                    { interviews: { some: { status: 'COMPLETED' } } },
+                  ],
+                },
+                { isCancelled: false },
+              ],
+            },
+          },
+        });
+      } else if (
+        statusIdNum === 5 ||
+        statusNameUpper === 'LETTER_OUT' ||
+        statusNameUpper.includes('LETTER') ||
+        statusNameUpper.includes('SELECTION')
+      ) {
+        andConditions.push({
+          collegeApplications: {
+            some: {
+              AND: [
+                { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] },
+                {
+                  OR: [
+                    { statusId: 5 },
+                    { status: { name: { equals: 'LETTER_OUT', mode: 'insensitive' } } },
+                    { selectionLetters: { some: {} } },
+                    { interviews: { some: { result: 'PASSED' } } },
+                  ],
+                },
+                { isCancelled: false },
+              ],
+            },
+          },
+        });
+      } else if (
+        statusIdNum === 6 ||
+        statusNameUpper === 'ADMISSION_DONE' ||
+        statusNameUpper === 'CONFIRMED'
+      ) {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  AND: [
+                    { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] },
+                    {
+                      OR: [
+                        { statusId: 6 },
+                        { status: { name: { equals: 'ADMISSION_DONE', mode: 'insensitive' } } },
+                        { status: { name: { equals: 'CONFIRMED', mode: 'insensitive' } } },
+                        { payments: { some: { type: 'ADMISSION_FEE' } } },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            {
+              AND: [
+                { finalCollegeId: collegeIdVal },
+                {
+                  OR: [
+                    { statusId: 6 },
+                    { status: { name: { equals: 'ADMISSION_DONE', mode: 'insensitive' } } },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+      } else if (
+        statusIdNum === 7 ||
+        statusNameUpper === 'CANCELLED' ||
+        statusNameUpper.includes('CANCEL')
+      ) {
+        andConditions.push({
+          collegeApplications: {
+            some: {
+              AND: [
+                { OR: [{ collegeId: collegeIdVal }, { college: { id: collegeIdVal } }] },
+                {
+                  OR: [
+                    { statusId: 7 },
+                    { isCancelled: true },
+                    { status: { name: { contains: 'CANCEL', mode: 'insensitive' } } },
+                    { approvalStatus: { contains: 'CANCEL', mode: 'insensitive' } },
+                  ],
+                },
+              ],
+            },
+          },
+        });
+      }
+    } else if (hasCollege) {
+      andConditions.push({
+        OR: [
+          {
+            collegeApplications: {
+              some: {
+                OR: [
+                  { collegeId: collegeIdVal },
+                  { college: { id: collegeIdVal } },
+                ],
+              },
+            },
+          },
+          { finalCollegeId: collegeIdVal },
+        ],
+      });
+    } else if (hasStatus) {
+      if (statusIdNum === 1 || statusNameUpper === 'LEAD') {
+        // Rule 2: A student who has reached APPLICATION must still count in LEAD because the student originally entered the pipeline as a lead.
+        // All students in scope originally entered as a lead!
+      } else if (statusIdNum === 2 || statusNameUpper === 'APPLICATION') {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  OR: [
+                    { statusId: 2 },
+                    { status: { name: { equals: 'APPLICATION', mode: 'insensitive' } } },
+                  ],
+                  isCancelled: false,
+                },
+              },
+            },
+            { statusId: 2 },
+            { status: { name: { equals: 'APPLICATION', mode: 'insensitive' } } },
+          ],
+        });
+      } else if (statusIdNum === 3 || statusNameUpper === 'INTERVIEW_SCHEDULED') {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  OR: [
+                    { statusId: 3 },
+                    { status: { name: { equals: 'INTERVIEW_SCHEDULED', mode: 'insensitive' } } },
+                    { interviews: { some: { status: 'SCHEDULED' } } },
+                  ],
+                  isCancelled: false,
+                },
+              },
+            },
+            { statusId: 3 },
+            { status: { name: { equals: 'INTERVIEW_SCHEDULED', mode: 'insensitive' } } },
+          ],
+        });
+      } else if (statusIdNum === 4 || statusNameUpper === 'INTERVIEW_DONE') {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  OR: [
+                    { statusId: 4 },
+                    { status: { name: { equals: 'INTERVIEW_DONE', mode: 'insensitive' } } },
+                    { interviews: { some: { status: 'COMPLETED' } } },
+                  ],
+                  isCancelled: false,
+                },
+              },
+            },
+            { statusId: 4 },
+            { status: { name: { equals: 'INTERVIEW_DONE', mode: 'insensitive' } } },
+          ],
+        });
+      } else if (
+        statusIdNum === 5 ||
+        statusNameUpper === 'LETTER_OUT' ||
+        statusNameUpper.includes('LETTER') ||
+        statusNameUpper.includes('SELECTION')
+      ) {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  OR: [
+                    { statusId: 5 },
+                    { status: { name: { equals: 'LETTER_OUT', mode: 'insensitive' } } },
+                    { selectionLetters: { some: {} } },
+                    { interviews: { some: { result: 'PASSED' } } },
+                  ],
+                  isCancelled: false,
+                },
+              },
+            },
+            { statusId: 5 },
+            { status: { name: { equals: 'LETTER_OUT', mode: 'insensitive' } } },
+          ],
+        });
+      } else if (
+        statusIdNum === 6 ||
+        statusNameUpper === 'ADMISSION_DONE' ||
+        statusNameUpper === 'CONFIRMED'
+      ) {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  OR: [
+                    { statusId: 6 },
+                    { status: { name: { equals: 'ADMISSION_DONE', mode: 'insensitive' } } },
+                    { status: { name: { equals: 'CONFIRMED', mode: 'insensitive' } } },
+                    { payments: { some: { type: 'ADMISSION_FEE' } } },
+                  ],
+                },
+              },
+            },
+            { statusId: 6 },
+            { status: { name: { equals: 'ADMISSION_DONE', mode: 'insensitive' } } },
+            { status: { name: { equals: 'CONFIRMED', mode: 'insensitive' } } },
+          ],
+        });
+      } else if (
+        statusIdNum === 7 ||
+        statusNameUpper === 'CANCELLED' ||
+        statusNameUpper.includes('CANCEL')
+      ) {
+        andConditions.push({
+          OR: [
+            {
+              collegeApplications: {
+                some: {
+                  OR: [
+                    { statusId: 7 },
+                    { isCancelled: true },
+                    { status: { name: { contains: 'CANCEL', mode: 'insensitive' } } },
+                    { approvalStatus: { contains: 'CANCEL', mode: 'insensitive' } },
+                  ],
+                },
+              },
+            },
+            { statusId: 7 },
+            { status: { name: { contains: 'CANCEL', mode: 'insensitive' } } },
+          ],
         });
       }
     }
@@ -426,6 +721,36 @@ export class ReportsService {
     };
   }
 
+  isCollegeCancelled(app: any): boolean {
+    const stName = (app.status?.name || '').toUpperCase();
+    const appSt = (app.approvalStatus || '').toUpperCase();
+    return Boolean(
+      app.isCancelled ||
+      app.statusId === 7 ||
+      stName.includes('CANCEL') ||
+      appSt.includes('CANCEL'),
+    );
+  }
+
+  isCollegeAdmission(app: any, lead: any): boolean {
+    const stName = (app.status?.name || '').toUpperCase();
+    return Boolean(
+      app.statusId === 6 ||
+      stName === 'ADMISSION_DONE' ||
+      stName === 'CONFIRMED' ||
+      (app.payments &&
+        app.payments.some(
+          (p: any) =>
+            p.type === 'ADMISSION_FEE' || p.paymentType === 'ADMISSION_FEE',
+        )) ||
+      (lead.finalCollegeId &&
+        (lead.finalCollegeId === app.collegeId ||
+          lead.finalCollegeId === app.college?.id) &&
+        (lead.statusId === 6 ||
+          (lead.status?.name || '').toUpperCase() === 'ADMISSION_DONE')),
+    );
+  }
+
   async getCRMReport(user: RequestUser, filters: CRMReportFilters) {
     const { WHERE } = await this.resolveScopeAndFilters(user, filters);
 
@@ -434,6 +759,9 @@ export class ReportsService {
       where: WHERE,
       include: {
         status: true,
+        team: {
+          select: { id: true, name: true },
+        },
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
         },
@@ -450,6 +778,11 @@ export class ReportsService {
               select: { id: true, name: true },
             },
             status: true,
+            interviews: {
+              orderBy: { createdAt: 'desc' },
+            },
+            selectionLetters: true,
+            payments: true,
           },
         },
       },
@@ -466,27 +799,115 @@ export class ReportsService {
     let admissionsDone = 0;
     let cancelled = 0;
 
-    leads.forEach((l) => {
-      const stName = (l.status?.name || '').toUpperCase();
+    const targetCollegeId =
+      filters.collegeId && filters.collegeId !== 'ALL'
+        ? filters.collegeId
+        : null;
 
-      if (l.collegeApplications && l.collegeApplications.length > 0) {
-        applications++;
-      } else if (stName.includes('APP')) {
-        applications++;
+    leads.forEach((l) => {
+      let apps = l.collegeApplications || [];
+      if (targetCollegeId) {
+        apps = apps.filter(
+          (a) =>
+            a.collegeId === targetCollegeId ||
+            a.college?.id === targetCollegeId,
+        );
       }
 
-      if (stName.includes('INTERVIEW_SCHEDULED') || stName === 'INTERVIEW SCHEDULED') {
-        interviewScheduled++;
-      } else if (stName.includes('INTERVIEW_DONE') || stName === 'INTERVIEW DONE') {
-        interviewDone++;
-      } else if (stName.includes('SELECTION')) {
-        selected++;
-      } else if (stName.includes('LETTER') || stName === 'LETTER OUT') {
-        letterOut++;
-      } else if (stName === 'ADMISSION_DONE' || stName === 'ADMISSION DONE' || stName === 'CONFIRMED') {
-        admissionsDone++;
-      } else if (stName.includes('CANCEL')) {
-        cancelled++;
+      if (apps.length > 0) {
+        apps.forEach((app) => {
+          const stName = (app.status?.name || '').toUpperCase();
+          const isCancelled = this.isCollegeCancelled(app);
+          const isAdmission = this.isCollegeAdmission(app, l);
+
+          if (isCancelled) {
+            cancelled++;
+          }
+
+          if (isAdmission) {
+            admissionsDone++;
+          }
+
+          if (!isCancelled) {
+            if (app.statusId === 2 || stName === 'APPLICATION') {
+              applications++;
+            }
+            if (
+              app.statusId === 3 ||
+              stName === 'INTERVIEW_SCHEDULED' ||
+              app.interviews?.some((i) => i.status === 'SCHEDULED')
+            ) {
+              interviewScheduled++;
+            }
+            if (
+              app.statusId === 4 ||
+              stName === 'INTERVIEW_DONE' ||
+              app.interviews?.some(
+                (i) => i.status === 'COMPLETED' && i.result !== 'PASSED',
+              )
+            ) {
+              interviewDone++;
+            }
+            if (
+              app.interviews?.some((i) => i.result === 'PASSED') ||
+              (app.selectionLetters && app.selectionLetters.length > 0) ||
+              app.statusId === 5 ||
+              stName.includes('SELECTION')
+            ) {
+              selected++;
+            }
+            if (
+              app.statusId === 5 ||
+              stName === 'LETTER_OUT' ||
+              (app.selectionLetters && app.selectionLetters.length > 0)
+            ) {
+              letterOut++;
+            }
+          }
+        });
+      } else if (!targetCollegeId) {
+        const stName = (l.status?.name || '').toUpperCase();
+        const isCancelled = l.statusId === 7 || stName.includes('CANCEL');
+        const isAdmission =
+          l.statusId === 6 ||
+          stName === 'ADMISSION_DONE' ||
+          stName === 'CONFIRMED' ||
+          stName.includes('ADMISSION');
+
+        if (isCancelled) {
+          cancelled++;
+        }
+
+        if (isAdmission) {
+          admissionsDone++;
+        }
+
+        if (!isCancelled) {
+          if (l.statusId === 2 || stName.includes('APP')) applications++;
+          if (
+            l.statusId === 3 ||
+            stName.includes('INTERVIEW_SCHEDULED') ||
+            stName === 'INTERVIEW SCHEDULED'
+          ) {
+            interviewScheduled++;
+          }
+          if (
+            l.statusId === 4 ||
+            stName.includes('INTERVIEW_DONE') ||
+            stName === 'INTERVIEW DONE'
+          ) {
+            interviewDone++;
+          }
+          if (
+            l.statusId === 5 ||
+            stName.includes('LETTER') ||
+            stName === 'LETTER OUT' ||
+            stName.includes('SELECTION')
+          ) {
+            selected++;
+            letterOut++;
+          }
+        }
       }
     });
 
@@ -511,6 +932,14 @@ export class ReportsService {
       const apps = lead.collegeApplications || [];
       if (apps.length > 0) {
         apps.forEach((app) => {
+          if (
+            targetCollegeId &&
+            app.collegeId !== targetCollegeId &&
+            app.college?.id !== targetCollegeId
+          ) {
+            return;
+          }
+
           const cId = app.collegeId || app.college?.id || 'Unknown';
           const cName = app.college?.name || 'Other College';
           if (!collegeMap.has(cId)) {
@@ -518,12 +947,37 @@ export class ReportsService {
           }
           const curr = collegeMap.get(cId)!;
           curr.leads++;
-          curr.apps++;
-          const st = (lead.status?.name || '').toUpperCase();
-          if (st.includes('INTERVIEW')) curr.interviews++;
-          if (st === 'ADMISSION_DONE' || st === 'ADMISSION DONE') curr.admissions++;
+
+          const isCancelled = this.isCollegeCancelled(app);
+          const isAdmission = this.isCollegeAdmission(app, lead);
+
+          // Apps: college applications that reached application stage or beyond
+          if (
+            !isCancelled &&
+            (app.statusId === 2 ||
+              (app.status?.name || '').toUpperCase() === 'APPLICATION' ||
+              app.statusId >= 3 ||
+              Boolean(app.applicationId))
+          ) {
+            curr.apps++;
+          }
+
+          // Interviews: scheduled or completed interviews for this college
+          if (
+            !isCancelled &&
+            (app.statusId === 3 ||
+              app.statusId === 4 ||
+              (app.interviews && app.interviews.length > 0))
+          ) {
+            curr.interviews++;
+          }
+
+          // Admissions: confirmed admissions for this college
+          if (isAdmission && !isCancelled) {
+            curr.admissions++;
+          }
         });
-      } else {
+      } else if (!targetCollegeId) {
         const cId = 'UNSPECIFIED';
         if (!collegeMap.has(cId)) {
           collegeMap.set(cId, { id: cId, name: 'Direct / General Leads', leads: 0, apps: 0, interviews: 0, admissions: 0 });
@@ -531,8 +985,9 @@ export class ReportsService {
         const curr = collegeMap.get(cId)!;
         curr.leads++;
         const st = (lead.status?.name || '').toUpperCase();
+        if (lead.statusId === 2 || st.includes('APP')) curr.apps++;
         if (st.includes('INTERVIEW')) curr.interviews++;
-        if (st === 'ADMISSION_DONE' || st === 'ADMISSION DONE') curr.admissions++;
+        if (lead.statusId === 6 || st.includes('ADMISSION') || st === 'CONFIRMED') curr.admissions++;
       }
     });
     const collegeWiseData = Array.from(collegeMap.values());
@@ -556,10 +1011,60 @@ export class ReportsService {
       }
       const curr = memberMap.get(mId)!;
       curr.leads++;
-      if (lead.collegeApplications && lead.collegeApplications.length > 0) curr.apps++;
-      const st = (lead.status?.name || '').toUpperCase();
-      if (st.includes('INTERVIEW')) curr.interviews++;
-      if (st === 'ADMISSION_DONE' || st === 'ADMISSION DONE') curr.admissions++;
+
+      let apps = lead.collegeApplications || [];
+      if (targetCollegeId) {
+        apps = apps.filter(
+          (a) => a.collegeId === targetCollegeId || a.college?.id === targetCollegeId,
+        );
+      }
+
+      const hasApp = apps.some(
+        (a) =>
+          !this.isCollegeCancelled(a) &&
+          (a.statusId === 2 ||
+            (a.status?.name || '').toUpperCase() === 'APPLICATION' ||
+            a.statusId >= 3 ||
+            Boolean(a.applicationId)),
+      );
+      if (
+        hasApp ||
+        (apps.length === 0 &&
+          (lead.statusId === 2 ||
+            (lead.status?.name || '').toUpperCase().includes('APP')))
+      ) {
+        curr.apps++;
+      }
+
+      const hasInterview = apps.some(
+        (a) =>
+          !this.isCollegeCancelled(a) &&
+          (a.statusId === 3 ||
+            a.statusId === 4 ||
+            (a.interviews && a.interviews.length > 0)),
+      );
+      if (
+        hasInterview ||
+        (apps.length === 0 &&
+          (lead.statusId === 3 ||
+            lead.statusId === 4 ||
+            (lead.status?.name || '').toUpperCase().includes('INTERVIEW')))
+      ) {
+        curr.interviews++;
+      }
+
+      const hasAdmission = apps.some(
+        (a) => this.isCollegeAdmission(a, lead) && !this.isCollegeCancelled(a),
+      );
+      if (
+        hasAdmission ||
+        (apps.length === 0 &&
+          (lead.statusId === 6 ||
+            (lead.status?.name || '').toUpperCase() === 'ADMISSION_DONE' ||
+            (lead.status?.name || '').toUpperCase() === 'CONFIRMED'))
+      ) {
+        curr.admissions++;
+      }
     });
     const memberWiseData = Array.from(memberMap.values());
 
@@ -591,6 +1096,9 @@ export class ReportsService {
       where: WHERE,
       include: {
         status: true,
+        team: {
+          select: { id: true, name: true },
+        },
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
         },
@@ -607,6 +1115,11 @@ export class ReportsService {
               select: { id: true, name: true },
             },
             status: true,
+            interviews: {
+              orderBy: { createdAt: 'desc' },
+            },
+            selectionLetters: true,
+            payments: true,
           },
         },
       },

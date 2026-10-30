@@ -166,6 +166,24 @@ describe('CallsService - Call Outcome History Persistence', () => {
     expect(call.notes).toBe('Asked to call tomorrow afternoon');
   });
 
+  it('5b. OTHER is accepted and persisted', async () => {
+    prismaMock.studentData.findUnique.mockResolvedValue({
+      id: 'sd-101',
+      phone: '9876543210',
+      assignmentItems: [{ assignment: { assignedToId: 'advisor-1', status: 'ACTIVE' } }],
+    });
+
+    prismaMock.callRecord.create.mockImplementation(({ data }) => Promise.resolve({ id: 'cr-other', ...data }));
+
+    const call = await service.createCallOutcome(
+      { studentDataId: 'sd-101', outcome: CallOutcome.OTHER, notes: 'Special circumstances discussed' },
+      'advisor-1',
+    );
+
+    expect(call.outcome).toBe(CallOutcome.OTHER);
+    expect(call.notes).toBe('Special circumstances discussed');
+  });
+
   it('6. INTERESTED is accepted and persisted', async () => {
     prismaMock.studentData.findUnique.mockResolvedValue({
       id: 'sd-101',
@@ -319,6 +337,26 @@ describe('CallsService - Call Outcome History Persistence', () => {
       include: {
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
+        },
+        studentData: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            category: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            upload: {
+              select: {
+                id: true,
+                fileName: true,
+              },
+            },
+          },
         },
       },
       orderBy: { createdAt: 'desc' },

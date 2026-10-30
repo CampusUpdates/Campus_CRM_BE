@@ -11,6 +11,7 @@ import {
   UploadedFile,
   UseGuards,
   UseInterceptors,
+  Delete,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -55,10 +56,72 @@ export class UploadsController {
   @UseInterceptors(FileInterceptor('file'))
   async uploadFile(
     @UploadedFile() file: UploadedMulterFile,
+    @Body('categoryId') categoryId: string,
     @Req() req: AuthenticatedRequest,
   ) {
     await this.assertAdminOrManager(req.user.sub, req.user.roleId);
-    return this.uploadsService.processFileUpload(file, req.user.sub);
+    return this.uploadsService.processFileUpload(file, req.user.sub, categoryId);
+  }
+
+  @Get('categories')
+  async getCategories(@Req() req: AuthenticatedRequest) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.getCategories();
+  }
+
+  @Post('categories')
+  async createCategory(
+    @Body('name') name: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.createCategory(name);
+  }
+
+  @Post(':id/confirm-import')
+  async confirmImport(
+    @Param('id') id: string,
+    @Body() confirmDto: { actions: Record<string, string> },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.confirmImport(id, confirmDto.actions, req.user.sub);
+  }
+
+  @Post(':id/cancel-import')
+  async cancelImport(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.cancelImport(id, req.user.sub);
+  }
+
+  @Delete(':id/soft')
+  async softDeleteUpload(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.softDeleteUpload(id);
+  }
+
+  @Get(':id/hard-delete-preview')
+  async previewHardDelete(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.previewHardDelete(id);
+  }
+
+  @Delete(':id/hard')
+  async hardDeleteUploadRecords(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    await this.assertAdminOrManager(req.user.sub, req.user.roleId);
+    return this.uploadsService.hardDeleteUploadRecords(id, req.user.sub);
   }
 
   @Get()
@@ -195,6 +258,9 @@ export class UploadsController {
     @Param('id') id: string,
     @Query('disposition') disposition: string | undefined,
     @Query('calledById') calledById: string | undefined,
+    @Query('time') time: string | undefined,
+    @Query('fromDate') fromDate: string | undefined,
+    @Query('toDate') toDate: string | undefined,
     @Req() req: AuthenticatedRequest,
     @Res() res: Response,
   ) {
@@ -204,6 +270,9 @@ export class UploadsController {
       res,
       disposition,
       calledById,
+      time,
+      fromDate,
+      toDate,
     );
   }
 

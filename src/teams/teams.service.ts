@@ -113,6 +113,16 @@ export class TeamsService {
           ...(team.managerId ? [{ managerId: team.managerId }] : []),
         ],
         status: 'ACTIVE',
+        role: {
+          name: {
+            in: [
+              'PROGRAM_ADVISOR',
+              'Program Advisor',
+              'TEAM_LEAD',
+              'Team Lead',
+            ],
+          },
+        },
       },
       select: {
         id: true,
@@ -194,26 +204,11 @@ export class TeamsService {
     const eligibleManagers = await this.prisma.user.findMany({
       where: {
         status: 'ACTIVE',
-        OR: [
-          {
-            role: {
-              name: {
-                in: ['SUPER_ADMIN', 'HR', 'Manager'],
-              },
-            },
+        role: {
+          name: {
+            in: ['MANAGER', 'Manager', 'manager'],
           },
-          {
-            role: {
-              permissions: {
-                some: {
-                  permission: {
-                    name: 'TEAM_MANAGE',
-                  },
-                },
-              },
-            },
-          },
-        ],
+        },
       },
       select: {
         id: true,
@@ -234,6 +229,20 @@ export class TeamsService {
     const eligibleMembers = await this.prisma.user.findMany({
       where: {
         status: 'ACTIVE',
+        role: {
+          name: {
+            in: [
+              'PROGRAM_ADVISOR',
+              'Program Advisor',
+              'PROGRAMADVISOR',
+              'PA',
+              'ADVISOR',
+              'TEAM_LEAD',
+              'Team Lead',
+              'TEAMLEAD',
+            ],
+          },
+        },
       },
       select: {
         id: true,
@@ -327,22 +336,21 @@ export class TeamsService {
         throw new BadRequestException('Selected manager is inactive.');
       }
 
-      const hasTeamManagePerm =
-        ['SUPER_ADMIN', 'HR', 'Manager'].includes(manager.role.name) ||
-        manager.role.permissions.some(
-          (p) => p.permission.name === 'TEAM_MANAGE',
-        );
-
-      if (!hasTeamManagePerm) {
+      const roleClean = (manager.role?.name || '').toUpperCase();
+      if (roleClean !== 'MANAGER') {
         throw new BadRequestException(
-          'Selected user is not eligible to manage teams.',
+          'Selected user is not eligible to manage teams. Must have MANAGER role.',
         );
+      }
+
+      if (memberIds.includes(managerId)) {
+        throw new BadRequestException('Manager cannot be a team member.');
       }
 
       if (memberIds.length > 0) {
         const members = await tx.user.findMany({
           where: { id: { in: memberIds } },
-          select: { id: true, status: true, teamId: true },
+          select: { id: true, status: true, teamId: true, role: { select: { name: true } } },
         });
 
         if (members.length !== memberIds.length) {
@@ -363,6 +371,14 @@ export class TeamsService {
           throw new BadRequestException(
             'One or more selected users already belong to another team.',
           );
+        }
+
+        const invalidRoleMember = members.find((m) => {
+          const roleClean = (m.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+          return !['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR', 'TEAM_LEAD', 'TEAMLEAD'].includes(roleClean);
+        });
+        if (invalidRoleMember) {
+          throw new BadRequestException('One or more selected members have an invalid role (must be Program Advisor or Team Lead).');
         }
       }
 
@@ -585,17 +601,18 @@ export class TeamsService {
         throw new BadRequestException('Selected manager is inactive.');
       }
 
-      const hasTeamManagePerm =
-        ['SUPER_ADMIN', 'HR', 'Manager'].includes(manager.role.name) ||
-        manager.role.permissions.some(
-          (p) => p.permission.name === 'TEAM_MANAGE',
-        );
-
-      if (!hasTeamManagePerm) {
+      const roleClean = (manager.role?.name || '').toUpperCase();
+      if (roleClean !== 'MANAGER') {
         throw new BadRequestException(
-          'Selected user is not eligible to manage teams.',
+          'Selected user is not eligible to manage teams. Must have MANAGER role.',
         );
       }
+    }
+
+    const currentManagerId = updateTeamDto.managerId || team.managerId;
+    const finalMemberIds = updateTeamDto.memberIds !== undefined ? updateTeamDto.memberIds : team.users.map(u => u.id);
+    if (finalMemberIds.includes(currentManagerId)) {
+      throw new BadRequestException('Manager cannot be a team member.');
     }
 
     const currentMemberIds = team.users.map((u) => u.id);
@@ -614,7 +631,7 @@ export class TeamsService {
       if (addedMemberIds.length > 0) {
         const addedUsers = await this.prisma.user.findMany({
           where: { id: { in: addedMemberIds } },
-          select: { id: true, status: true },
+          select: { id: true, status: true, role: { select: { name: true } } },
         });
 
         if (addedUsers.length !== addedMemberIds.length) {
@@ -628,6 +645,14 @@ export class TeamsService {
           throw new BadRequestException(
             'One or more selected users are inactive.',
           );
+        }
+
+        const invalidRoleMember = addedUsers.find((m) => {
+          const roleClean = (m.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+          return !['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR', 'TEAM_LEAD', 'TEAMLEAD'].includes(roleClean);
+        });
+        if (invalidRoleMember) {
+          throw new BadRequestException('One or more selected members have an invalid role (must be Program Advisor or Team Lead).');
         }
       }
     }

@@ -63,13 +63,22 @@ export class UsersService {
     return user?.role?.name === 'HR';
   }
 
-  // Get all users (scoped for Team Lead)
+  // Helper: Normalize name (title case, preserve spaces)
+  private normalizeName(name?: string): string | undefined {
+    if (!name) return name;
+    return name.replace(/(^|\s|-|')\S/g, (match) => match.toUpperCase()).trim();
+  }
+
+  // Get all users (scoped based on authorization: Super Admin/HR sees all, Manager sees team, Team Lead sees assigned, PA sees self)
   async findAll(callingUser?: { sub: string }) {
     let whereClause: any = {};
     if (callingUser?.sub) {
       const callingUserRecord = await this.prisma.user.findUnique({
         where: { id: callingUser.sub },
-        select: { role: { select: { name: true } } },
+        select: {
+          role: { select: { name: true } },
+          teamId: true,
+        },
       });
       const roleName = (callingUserRecord?.role?.name || '').toUpperCase();
       const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
@@ -77,19 +86,91 @@ export class UsersService {
       );
 
       if (!isSuperOrHr) {
-        const isTeamLead = await this.teamLeadAuthService.isTeamLead(
-          callingUser.sub,
-        );
-        if (isTeamLead) {
-          const advisorIds =
-            await this.teamLeadAuthService.getTeamLeadAdvisorIds(
-              callingUser.sub,
-            );
-          whereClause = {
-            id: {
-              in: Array.from(new Set([callingUser.sub, ...advisorIds])),
+        // Check if user is a Manager (by role name or teams managed)
+        const managedTeams = await this.prisma.team.findMany({
+          where: { managerId: callingUser.sub, isActive: true },
+          select: { id: true },
+        });
+        const managedTeamIds = managedTeams.map((t) => t.id);
+        const normalizedRole = roleName.replace(/\s+/g, '_');
+        const isManager =
+          normalizedRole.includes('MANAGER') || managedTeamIds.length > 0;
+
+        if (isManager) {
+          const targetTeamIds = Array.from(
+            new Set([
+              ...managedTeamIds,
+              ...(callingUserRecord?.teamId ? [callingUserRecord.teamId] : []),
+            ]),
+          );
+
+          // 1. Members whose teamId is in targetTeamIds or managerId is callingUser.sub
+          const teamMembers = await this.prisma.user.findMany({
+            where: {
+              OR: [
+                ...(targetTeamIds.length > 0
+                  ? [{ teamId: { in: targetTeamIds } }]
+                  : []),
+                { managerId: callingUser.sub },
+              ],
             },
+            select: { id: true },
+          });
+          const memberIds = teamMembers.map((m) => m.id);
+
+          // 2. Team leads of those teams
+          let teamLeadUserIds: string[] = [];
+          if (targetTeamIds.length > 0) {
+            const teamLeadRecords = await this.prisma.teamLead.findMany({
+              where: { teamId: { in: targetTeamIds } },
+              select: { userId: true },
+            });
+            teamLeadUserIds = teamLeadRecords.map((tl) => tl.userId);
+          }
+
+          // 3. Supervised advisors of those team leads
+          let supervisedAdvisorIds: string[] = [];
+          if (teamLeadUserIds.length > 0) {
+            const supervisedRecords = await this.prisma.teamLeadAdvisor.findMany({
+              where: { teamLeadId: { in: teamLeadUserIds } },
+              select: { advisorId: true },
+            });
+            supervisedAdvisorIds = supervisedRecords.map((sa) => sa.advisorId);
+          }
+
+          const managerScopedUserIds = Array.from(
+            new Set([
+              callingUser.sub,
+              ...memberIds,
+              ...teamLeadUserIds,
+              ...supervisedAdvisorIds,
+            ]),
+          );
+
+          whereClause = {
+            id: { in: managerScopedUserIds },
           };
+        } else {
+          // Check if Team Lead
+          const isTeamLead = await this.teamLeadAuthService.isTeamLead(
+            callingUser.sub,
+          );
+          if (isTeamLead) {
+            const advisorIds =
+              await this.teamLeadAuthService.getTeamLeadAdvisorIds(
+                callingUser.sub,
+              );
+            whereClause = {
+              id: {
+                in: Array.from(new Set([callingUser.sub, ...advisorIds])),
+              },
+            };
+          } else {
+            // Program Advisor or other non-supervisory role: only themselves
+            whereClause = {
+              id: callingUser.sub,
+            };
+          }
         }
       }
     }
@@ -164,9 +245,7 @@ export class UsersService {
     const roleNameClean = (role.name || '').toUpperCase().replace(/\s+/g, '_');
     const isTeamLeadRole = roleNameClean === 'TEAM_LEAD' || roleNameClean === 'TEAMLEAD';
 
-    if (isTeamLeadRole && !createUserDto.teamId) {
-      throw new BadRequestException('Team Lead must be assigned to a team.');
-    }
+
 
     // Super Admin Protection Rules
     const superAdminRole = await this.getSuperAdminRole();
@@ -215,8 +294,8 @@ export class UsersService {
     const newUser = await this.prisma.$transaction(async (tx) => {
       const u = await tx.user.create({
         data: {
-          firstName: createUserDto.firstName,
-          lastName: createUserDto.lastName,
+          firstName: this.normalizeName(createUserDto.firstName)!,
+          lastName: this.normalizeName(createUserDto.lastName),
           email: createUserDto.email,
           phone: createUserDto.phone,
           alternatePhone: createUserDto.alternatePhone,
@@ -252,7 +331,7 @@ export class UsersService {
       }
 
       return u;
-    });
+    }, { maxWait: 10000, timeout: 30000 });
 
     const temporaryToken = await this.jwtService.signAsync(
       {
@@ -383,8 +462,8 @@ export class UsersService {
     const updatedUser = await this.prisma.user.update({
       where: { id: userId },
       data: {
-        firstName: dto.firstName,
-        lastName: dto.lastName,
+        firstName: dto.firstName !== undefined ? this.normalizeName(dto.firstName) : undefined,
+        lastName: dto.lastName !== undefined ? this.normalizeName(dto.lastName) : undefined,
         phone: dto.phone,
         alternatePhone: dto.alternatePhone,
         dob: dto.dob ? new Date(dto.dob) : undefined,
@@ -522,8 +601,8 @@ export class UsersService {
       return tx.user.update({
         where: { id },
         data: {
-          firstName: updateUserDto.firstName,
-          lastName: updateUserDto.lastName,
+          firstName: updateUserDto.firstName !== undefined ? this.normalizeName(updateUserDto.firstName) : undefined,
+          lastName: updateUserDto.lastName !== undefined ? this.normalizeName(updateUserDto.lastName) : undefined,
           email: updateUserDto.email,
           phone: updateUserDto.phone,
           alternatePhone: updateUserDto.alternatePhone,
@@ -663,15 +742,11 @@ export class UsersService {
     if (
       superAdminRole &&
       user.roleId === superAdminRole.id &&
-      user.status === UserStatus.ACTIVE &&
       status !== UserStatus.ACTIVE
     ) {
-      const activeSuperAdminCount = await this.countActiveSuperAdmins();
-      if (activeSuperAdminCount <= 1) {
-        throw new ConflictException(
-          'Cannot deactivate the only active Super Admin. System must have at least one active Super Admin.',
-        );
-      }
+      throw new ForbiddenException(
+        'Super Admin accounts cannot be deactivated.',
+      );
     }
 
     const updatedUser = await this.prisma.$transaction(async (tx) => {
@@ -791,7 +866,7 @@ export class UsersService {
       });
 
       return newSuperAdmin;
-    });
+    }, { maxWait: 10000, timeout: 30000 });
   }
 
   // Deactivate user

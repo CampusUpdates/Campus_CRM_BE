@@ -125,8 +125,8 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
         findUnique: jest.fn().mockResolvedValue(mockStatusLead),
       },
       college: {
-        findMany: jest.fn().mockResolvedValue([]),
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([{ id: 'col-1', name: 'Col 1', isActive: true, hasTieUp: true }]),
+        findUnique: jest.fn().mockResolvedValue({ id: 'col-1', name: 'Col 1', isActive: true, hasTieUp: true }),
       },
       leadCollege: {
         findMany: jest.fn().mockResolvedValue([]),
@@ -525,7 +525,7 @@ describe('LeadsService - Lead Reclaim & Ownership History', () => {
           city: 'Delhi',
           state: 'Delhi',
           source: LeadSource.OTHER,
-          collegeIds: [],
+          collegeIds: ['col-1'],
         },
         advisorUuid,
       );

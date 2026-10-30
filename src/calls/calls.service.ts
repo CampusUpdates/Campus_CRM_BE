@@ -15,6 +15,10 @@ import type {
 import { DataAssignmentStatus } from '@prisma/client';
 import { CreateCallOutcomeDto } from './dto/create-call-outcome.dto';
 import { GetCallLogsDto } from './dto/get-call-logs.dto';
+import {
+  normalizePhone,
+  getPhoneQueryCandidates,
+} from '../common/utils/phone.util';
 
 @Injectable()
 export class CallsService {
@@ -44,6 +48,12 @@ export class CallsService {
                     id: true,
                     fileName: true,
                     uploadedAt: true,
+                  },
+                },
+                category: {
+                  select: {
+                    id: true,
+                    name: true,
                   },
                 },
               },
@@ -79,6 +89,7 @@ export class CallsService {
           city: item.studentData.city,
           state: item.studentData.state,
           createdAt: item.studentData.createdAt,
+          category: item.studentData.category,
           upload: item.studentData.upload,
           assignment: {
             id: assignment.id,
@@ -462,6 +473,12 @@ export class CallsService {
             uploadedAt: true,
           },
         },
+        category: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
         assignmentItems: {
           where: isAdminOrManager
             ? { assignment: { status: DataAssignmentStatus.ACTIVE } }
@@ -637,7 +654,11 @@ export class CallsService {
         throw new NotFoundException('Referenced lead not found.');
       }
 
-      if (studentData.phone && lead.phone && studentData.phone !== lead.phone) {
+      if (
+        studentData.phone &&
+        lead.phone &&
+        normalizePhone(studentData.phone) !== normalizePhone(lead.phone)
+      ) {
         throw new BadRequestException(
           'Referenced lead is not associated with this student data contact.',
         );
@@ -687,30 +708,126 @@ export class CallsService {
       roleId,
     );
 
+    let targetStudent: { id: string; phone?: string | null } | null = null;
+
     if (isAdminOrManager) {
-      const studentData = await this.prisma.studentData.findUnique({
+      targetStudent = await this.prisma.studentData.findUnique({
         where: { id: studentDataId },
-        select: { id: true },
+        select: { id: true, phone: true },
       });
-      if (!studentData) {
+      if (!targetStudent) {
         throw new NotFoundException('Student data record not found.');
       }
     } else {
-      await this.getAssignedStudentDataOne(
+      const assigned = await this.getAssignedStudentDataOne(
         studentDataId,
         advisorUserId,
         roleId,
       );
+      targetStudent = { id: assigned.id, phone: assigned.phone };
     }
 
+    const normPhone = normalizePhone(targetStudent.phone);
+    if (!normPhone || normPhone.length < 10) {
+      return this.prisma.callRecord.findMany({
+        where: { studentDataId },
+        include: {
+          createdBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+          studentData: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              category: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+              upload: {
+                select: {
+                  id: true,
+                  fileName: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
+
+    const phoneCandidates = getPhoneQueryCandidates(normPhone);
+
+    const [matchingStudents, matchingLeads] = await Promise.all([
+      this.prisma.studentData.findMany({
+        where: {
+          phone: { in: phoneCandidates },
+        },
+        select: { id: true, phone: true },
+      }),
+      this.prisma.lead.findMany({
+        where: {
+          phone: { in: phoneCandidates },
+        },
+        select: { id: true, phone: true },
+      }),
+    ]);
+
+    const matchingStudentIds = matchingStudents
+      .filter((s) => normalizePhone(s.phone) === normPhone)
+      .map((s) => s.id);
+
+    if (!matchingStudentIds.includes(studentDataId)) {
+      matchingStudentIds.push(studentDataId);
+    }
+
+    const matchingLeadIds = matchingLeads
+      .filter((l) => normalizePhone(l.phone) === normPhone)
+      .map((l) => l.id);
+
     return this.prisma.callRecord.findMany({
-      where: { studentDataId },
+      where: {
+        OR: [
+          { studentDataId: { in: matchingStudentIds } },
+          ...(matchingLeadIds.length > 0
+            ? [{ leadId: { in: matchingLeadIds } }]
+            : []),
+        ],
+      },
       include: {
         createdBy: {
           select: {
             id: true,
             firstName: true,
             lastName: true,
+          },
+        },
+        studentData: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            category: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            upload: {
+              select: {
+                id: true,
+                fileName: true,
+              },
+            },
           },
         },
       },

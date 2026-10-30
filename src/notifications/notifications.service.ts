@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, MessageEvent } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationType } from '@prisma/client';
+import { Subject, Observable } from 'rxjs';
 
 export interface CreateNotificationDto {
   title: string;
@@ -19,7 +20,33 @@ export interface GetNotificationsQueryDto {
 
 @Injectable()
 export class NotificationsService {
+  private readonly userStreams = new Map<string, Subject<MessageEvent>>();
+
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Retrieves or initializes an active SSE stream for a specific authenticated user.
+   */
+  getUserStream(userId: string): Observable<MessageEvent> {
+    let userSubject = this.userStreams.get(userId);
+    if (!userSubject || userSubject.closed) {
+      userSubject = new Subject<MessageEvent>();
+      this.userStreams.set(userId, userSubject);
+    }
+
+    // Send initial handshake ping
+    setTimeout(() => {
+      userSubject?.next({
+        data: {
+          type: 'CONNECTED',
+          userId,
+          timestamp: new Date().toISOString(),
+        },
+      } as MessageEvent);
+    }, 50);
+
+    return userSubject.asObservable();
+  }
 
   /**
    * Creates 1 Notification record and 1 NotificationRecipient record per recipient.
@@ -74,6 +101,32 @@ export class NotificationsService {
         recipients: true,
       },
     });
+
+    // Real-time delivery via SSE to authorized recipient streams
+    setTimeout(() => {
+      try {
+        for (const recipient of notification.recipients) {
+          const stream = this.userStreams.get(recipient.userId);
+          if (stream && !stream.closed) {
+            stream.next({
+              data: {
+                type: 'NOTIFICATION',
+                notification: {
+                  id: notification.id,
+                  title: notification.title,
+                  message: notification.message,
+                  type: notification.type,
+                  createdAt: notification.createdAt,
+                  isRead: recipient.isRead,
+                },
+              },
+            } as MessageEvent);
+          }
+        }
+      } catch (err) {
+        // non-blocking SSE broadcast
+      }
+    }, 0);
 
     return notification;
   }
@@ -273,5 +326,218 @@ export class NotificationsService {
     });
 
     return { success: true, message: 'All notifications cleared successfully' };
+  }
+
+  /**
+   * Retrieves persistent, database-backed unread indicators for sidebar modules.
+   * Tracks unread counts independently for College Counselling, Colleges, and Notifications.
+   */
+  async getSidebarIndicators(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        roleId: true,
+        role: { select: { name: true } },
+        teamId: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      return {
+        counsellingUnread: 0,
+        collegesUnread: 0,
+        notificationsUnread: 0,
+      };
+    }
+
+    const defaultSince = user.createdAt || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    // Fetch existing module read states
+    const [counsellingReadState, collegesReadState, leadsReadState] = await Promise.all([
+      this.prisma.userModuleReadState.findUnique({
+        where: {
+          userId_module: {
+            userId,
+            module: 'COLLEGE_COUNSELLING',
+          },
+        },
+      }),
+      this.prisma.userModuleReadState.findUnique({
+        where: {
+          userId_module: {
+            userId,
+            module: 'COLLEGES',
+          },
+        },
+      }),
+      this.prisma.userModuleReadState.findUnique({
+        where: {
+          userId_module: {
+            userId,
+            module: 'LEADS',
+          },
+        },
+      }),
+    ]);
+
+    const counsellingSince = counsellingReadState?.lastSeenAt ?? defaultSince;
+    const collegesSince = collegesReadState?.lastSeenAt ?? defaultSince;
+    const leadsSince = leadsReadState?.lastSeenAt ?? defaultSince;
+
+    // 1. Calculate Leads Unread Count from unread notifications belonging to this user
+    const leadsCount = await this.prisma.notificationRecipient.count({
+      where: {
+        userId,
+        isRead: false,
+        notification: {
+          OR: [
+            { type: 'LEAD' },
+            {
+              title: {
+                in: [
+                  'New Lead Created',
+                  'Lead Posted',
+                  'New Lead Assigned',
+                  'Lead Reallocated to You',
+                  'Lead Shared',
+                ],
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    // 2. Calculate College Counselling Unread Count from unread notifications belonging to this user
+    const counsellingCount = await this.prisma.notificationRecipient.count({
+      where: {
+        userId,
+        isRead: false,
+        notification: {
+          OR: [
+            {
+              title: {
+                in: ['Counselling Requested', 'Counselling Completed'],
+              },
+            },
+            { message: { contains: '/counselling' } },
+          ],
+        },
+      },
+    });
+
+    // 3. Calculate Colleges Unread Count (new colleges created in Colleges module)
+    const collegesCount = await this.prisma.college.count({
+      where: {
+        createdAt: { gt: collegesSince },
+        isActive: true,
+      },
+    });
+
+    // 4. Notifications total unread count
+    const notificationsCount = await this.getUnreadCount(userId);
+
+    return {
+      leadsUnread: leadsCount,
+      counsellingUnread: counsellingCount,
+      collegesUnread: collegesCount,
+      notificationsUnread: notificationsCount.count,
+    };
+  }
+
+  /**
+   * Persists the user's viewed timestamp for a specific sidebar module,
+   * and marks unread notifications belonging to that module as read for this user.
+   */
+  async markModuleSeen(userId: string, module: string) {
+    const now = new Date();
+    await this.prisma.userModuleReadState.upsert({
+      where: {
+        userId_module: {
+          userId,
+          module,
+        },
+      },
+      create: {
+        userId,
+        module,
+        lastSeenAt: now,
+      },
+      update: {
+        lastSeenAt: now,
+      },
+    });
+
+    if (module === 'LEADS') {
+      const leadRecipients = await this.prisma.notificationRecipient.findMany({
+        where: {
+          userId,
+          isRead: false,
+          notification: {
+            OR: [
+              { type: 'LEAD' },
+              {
+                title: {
+                  in: [
+                    'New Lead Created',
+                    'Lead Posted',
+                    'New Lead Assigned',
+                    'Lead Reallocated to You',
+                    'Lead Shared',
+                  ],
+                },
+              },
+            ],
+          },
+        },
+        select: { id: true },
+      });
+
+      if (leadRecipients.length > 0) {
+        await this.prisma.notificationRecipient.updateMany({
+          where: {
+            id: { in: leadRecipients.map((r) => r.id) },
+          },
+          data: {
+            isRead: true,
+            readAt: now,
+          },
+        });
+      }
+    } else if (module === 'COLLEGE_COUNSELLING') {
+      const counsellingRecipients = await this.prisma.notificationRecipient.findMany({
+        where: {
+          userId,
+          isRead: false,
+          notification: {
+            OR: [
+              {
+                title: {
+                  in: ['Counselling Requested', 'Counselling Completed'],
+                },
+              },
+              { message: { contains: '/counselling' } },
+            ],
+          },
+        },
+        select: { id: true },
+      });
+
+      if (counsellingRecipients.length > 0) {
+        await this.prisma.notificationRecipient.updateMany({
+          where: {
+            id: { in: counsellingRecipients.map((r) => r.id) },
+          },
+          data: {
+            isRead: true,
+            readAt: now,
+          },
+        });
+      }
+    }
+
+    return { success: true, module, lastSeenAt: now };
   }
 }

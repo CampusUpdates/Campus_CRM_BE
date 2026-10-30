@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { LeadsService } from './leads.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -9,6 +9,7 @@ import { CollegeStatus, LeadSource } from '@prisma/client';
 describe('LeadsService - College Pitch Approval Rules', () => {
   let service: LeadsService;
   let prismaMock: any;
+  let teamLeadAuthService: any;
 
   const validLeadUuid = '11111111-1111-4111-8111-111111111111';
   const validUserUuid = '22222222-2222-4222-8222-222222222222';
@@ -37,6 +38,8 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       lead: {
         findFirst: jest.fn().mockResolvedValue(null),
         findUnique: jest.fn().mockResolvedValue(mockLead),
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
         create: jest.fn().mockResolvedValue(mockLead),
         update: jest.fn().mockResolvedValue(mockLead),
       },
@@ -89,6 +92,12 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       notificationRecipient: {
         create: jest.fn().mockResolvedValue({}),
       },
+      team: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      teamMember: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       $transaction: jest.fn((cb) => cb(prismaMock)),
     };
 
@@ -115,6 +124,9 @@ describe('LeadsService - College Pitch Approval Rules', () => {
     }).compile();
 
     service = module.get<LeadsService>(LeadsService);
+    teamLeadAuthService = module.get<TeamLeadAuthorizationService>(
+      TeamLeadAuthorizationService,
+    );
   });
 
   const createDto = {
@@ -750,6 +762,108 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('Program Advisor Lead Ownership Enforcement (findAll)', () => {
+    const advisorUserId = 'advisor-uuid-1111';
+    const otherUserId = 'advisor-uuid-2222';
+
+    beforeEach(() => {
+      prismaMock.team.findMany.mockResolvedValue([]);
+      prismaMock.teamMember.findMany.mockResolvedValue([]);
+      teamLeadAuthService.isTeamLead.mockResolvedValue(false);
+    });
+
+    it('should reject a Program Advisor trying to filter by another advisor ownerId with ForbiddenException', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: advisorUserId,
+        role: { name: 'PROGRAM_ADVISOR' },
+        teamId: 10,
+      });
+
+      await expect(
+        service.findAll(
+          { sub: advisorUserId },
+          { ownerId: otherUserId },
+          'OWN',
+        ),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should reject a Program Advisor trying to filter by UNASSIGNED ownerId with ForbiddenException', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: advisorUserId,
+        role: { name: 'PA' },
+        teamId: 10,
+      });
+
+      await expect(
+        service.findAll(
+          { sub: advisorUserId },
+          { ownerId: 'UNASSIGNED' },
+          'OWN',
+        ),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should allow a Program Advisor to query their own leads without ownerId filter', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: advisorUserId,
+        role: { name: 'PROGRAM_ADVISOR' },
+        teamId: 10,
+      });
+      prismaMock.lead.findMany.mockResolvedValue([]);
+      prismaMock.lead.count.mockResolvedValue(0);
+
+      const result = await service.findAll(
+        { sub: advisorUserId },
+        {},
+        'OWN',
+      );
+
+      expect(result).toBeDefined();
+      expect(prismaMock.lead.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            AND: expect.arrayContaining([
+              expect.objectContaining({
+                OR: [
+                  { assignments: { some: { userId: advisorUserId } } },
+                  {
+                    createdById: advisorUserId,
+                    assignments: {
+                      none: {
+                        userId: { not: advisorUserId },
+                        status: 'ACTIVE',
+                        expiresAt: expect.any(Object),
+                      },
+                    },
+                  },
+                ],
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it('should allow Super Admin or Manager to filter by any ownerId', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: 'manager-uuid-9999',
+        role: { name: 'MANAGER' },
+        teamId: 10,
+      });
+      prismaMock.lead.findMany.mockResolvedValue([]);
+      prismaMock.lead.count.mockResolvedValue(0);
+
+      const result = await service.findAll(
+        { sub: 'manager-uuid-9999' },
+        { ownerId: otherUserId },
+        'MANAGED',
+      );
+
+      expect(result).toBeDefined();
     });
   });
 });

@@ -29,6 +29,10 @@ import { InteractionsModule } from './interactions/interactions.module';
 import { TodosModule } from './todos/todos.module';
 import { CallsModule } from './calls/calls.module';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EmailModule } from './email/email.module';
+import { DataReportModule } from './data-report/data-report.module';
+import { BroadcastModule } from './broadcast/broadcast.module';
+import { CounsellingModule } from './counselling/counselling.module';
 
 @Module({
   imports: [
@@ -62,6 +66,10 @@ import { ScheduleModule } from '@nestjs/schedule';
     ReportsModule,
     CallsModule,
     ScheduleModule.forRoot(),
+    EmailModule,
+    DataReportModule,
+    BroadcastModule,
+    CounsellingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -6,6 +6,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { OfficeModule } from 'src/office/office.module';
 import { AttendanceClassificationService } from 'src/attendance/attendance-classification.service';
+import { PasswordResetService } from './password-reset.service';
 
 @Module({
   imports: [
@@ -24,7 +25,7 @@ import { AttendanceClassificationService } from 'src/attendance/attendance-class
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AttendanceClassificationService],
+  providers: [AuthService, AttendanceClassificationService, PasswordResetService],
   exports: [JwtModule, AuthService],
 })
 export class AuthModule {}
