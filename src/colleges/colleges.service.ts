@@ -260,7 +260,7 @@ export class CollegesService {
       await tx.college.delete({
         where: { id },
       });
-    });
+    }, { maxWait: 10000, timeout: 30000 });
 
     return { message: 'College permanently deleted' };
   }

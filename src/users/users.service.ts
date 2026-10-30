@@ -18,6 +18,12 @@ import { USER_SAFE_SELECT } from 'src/common/constants/constants.user';
 import { ActivityLogService } from 'src/activity-log/activity-log.service';
 import { ActivityType, UserStatus } from '@prisma/client';
 import { ReplaceSuperAdminDto } from './dto/replace-super-admin.dto';
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
+
+import {
+  processUserTeamTransfer,
+  releaseUserLeadsToPool,
+} from './utils/team-transfer.util';
 
 @Injectable()
 export class UsersService {
@@ -25,7 +31,8 @@ export class UsersService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly activityLogService: ActivityLogService,
-  ) {}
+    private readonly teamLeadAuthService: TeamLeadAuthorizationService,
+  ) { }
 
   // Helper: Get SUPER_ADMIN role record
   private async getSuperAdminRole() {
@@ -56,12 +63,124 @@ export class UsersService {
     return user?.role?.name === 'HR';
   }
 
-  // Get all users
-  async findAll() {
+  // Helper: Normalize name (title case, preserve spaces)
+  private normalizeName(name?: string): string | undefined {
+    if (!name) return name;
+    return name.replace(/(^|\s|-|')\S/g, (match) => match.toUpperCase()).trim();
+  }
+
+  // Get all users (scoped based on authorization: Super Admin/HR sees all, Manager sees team, Team Lead sees assigned, PA sees self)
+  async findAll(callingUser?: { sub: string }) {
+    let whereClause: any = {};
+    if (callingUser?.sub) {
+      const callingUserRecord = await this.prisma.user.findUnique({
+        where: { id: callingUser.sub },
+        select: {
+          role: { select: { name: true } },
+          teamId: true,
+        },
+      });
+      const roleName = (callingUserRecord?.role?.name || '').toUpperCase();
+      const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
+        roleName,
+      );
+
+      if (!isSuperOrHr) {
+        // Check if user is a Manager (by role name or teams managed)
+        const managedTeams = await this.prisma.team.findMany({
+          where: { managerId: callingUser.sub, isActive: true },
+          select: { id: true },
+        });
+        const managedTeamIds = managedTeams.map((t) => t.id);
+        const normalizedRole = roleName.replace(/\s+/g, '_');
+        const isManager =
+          normalizedRole.includes('MANAGER') || managedTeamIds.length > 0;
+
+        if (isManager) {
+          const targetTeamIds = Array.from(
+            new Set([
+              ...managedTeamIds,
+              ...(callingUserRecord?.teamId ? [callingUserRecord.teamId] : []),
+            ]),
+          );
+
+          // 1. Members whose teamId is in targetTeamIds or managerId is callingUser.sub
+          const teamMembers = await this.prisma.user.findMany({
+            where: {
+              OR: [
+                ...(targetTeamIds.length > 0
+                  ? [{ teamId: { in: targetTeamIds } }]
+                  : []),
+                { managerId: callingUser.sub },
+              ],
+            },
+            select: { id: true },
+          });
+          const memberIds = teamMembers.map((m) => m.id);
+
+          // 2. Team leads of those teams
+          let teamLeadUserIds: string[] = [];
+          if (targetTeamIds.length > 0) {
+            const teamLeadRecords = await this.prisma.teamLead.findMany({
+              where: { teamId: { in: targetTeamIds } },
+              select: { userId: true },
+            });
+            teamLeadUserIds = teamLeadRecords.map((tl) => tl.userId);
+          }
+
+          // 3. Supervised advisors of those team leads
+          let supervisedAdvisorIds: string[] = [];
+          if (teamLeadUserIds.length > 0) {
+            const supervisedRecords = await this.prisma.teamLeadAdvisor.findMany({
+              where: { teamLeadId: { in: teamLeadUserIds } },
+              select: { advisorId: true },
+            });
+            supervisedAdvisorIds = supervisedRecords.map((sa) => sa.advisorId);
+          }
+
+          const managerScopedUserIds = Array.from(
+            new Set([
+              callingUser.sub,
+              ...memberIds,
+              ...teamLeadUserIds,
+              ...supervisedAdvisorIds,
+            ]),
+          );
+
+          whereClause = {
+            id: { in: managerScopedUserIds },
+          };
+        } else {
+          // Check if Team Lead
+          const isTeamLead = await this.teamLeadAuthService.isTeamLead(
+            callingUser.sub,
+          );
+          if (isTeamLead) {
+            const advisorIds =
+              await this.teamLeadAuthService.getTeamLeadAdvisorIds(
+                callingUser.sub,
+              );
+            whereClause = {
+              id: {
+                in: Array.from(new Set([callingUser.sub, ...advisorIds])),
+              },
+            };
+          } else {
+            // Program Advisor or other non-supervisory role: only themselves
+            whereClause = {
+              id: callingUser.sub,
+            };
+          }
+        }
+      }
+    }
+
     return this.prisma.user.findMany({
+      where: whereClause,
       select: USER_SAFE_SELECT,
     });
   }
+
 
   // Generate username
   private async generateUsername(
@@ -123,6 +242,11 @@ export class UsersService {
       throw new NotFoundException(ERROR_MESSAGES.ROLE_NOT_FOUND);
     }
 
+    const roleNameClean = (role.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isTeamLeadRole = roleNameClean === 'TEAM_LEAD' || roleNameClean === 'TEAMLEAD';
+
+
+
     // Super Admin Protection Rules
     const superAdminRole = await this.getSuperAdminRole();
     if (superAdminRole && createUserDto.roleId === superAdminRole.id) {
@@ -166,28 +290,48 @@ export class UsersService {
     // Hash Temporary Password
     const passwordHash = await argon2.hash(temporaryPassword);
 
-    // Create User
-    const newUser = await this.prisma.user.create({
-      data: {
-        firstName: createUserDto.firstName,
-        lastName: createUserDto.lastName,
-        email: createUserDto.email,
-        phone: createUserDto.phone,
-        alternatePhone: createUserDto.alternatePhone,
-        dob: createUserDto.dob ? new Date(createUserDto.dob) : undefined,
-        username,
-        passwordHash,
-        roleId: createUserDto.roleId,
-        teamId: createUserDto.teamId,
-      },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roleId: true,
-      },
-    });
+    // Create User & TeamLead in Transaction
+    const newUser = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.user.create({
+        data: {
+          firstName: this.normalizeName(createUserDto.firstName)!,
+          lastName: this.normalizeName(createUserDto.lastName),
+          email: createUserDto.email,
+          phone: createUserDto.phone,
+          alternatePhone: createUserDto.alternatePhone,
+          dob: createUserDto.dob ? new Date(createUserDto.dob) : undefined,
+          username,
+          passwordHash,
+          roleId: createUserDto.roleId,
+          teamId: createUserDto.teamId,
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          roleId: true,
+        },
+      });
+
+      if (isTeamLeadRole && createUserDto.teamId) {
+        await tx.teamLead.upsert({
+          where: {
+            teamId_userId: {
+              teamId: createUserDto.teamId,
+              userId: u.id,
+            },
+          },
+          create: {
+            teamId: createUserDto.teamId,
+            userId: u.id,
+          },
+          update: {},
+        });
+      }
+
+      return u;
+    }, { maxWait: 10000, timeout: 30000 });
 
     const temporaryToken = await this.jwtService.signAsync(
       {
@@ -212,8 +356,37 @@ export class UsersService {
     };
   }
 
-  // Find by ID
-  async findOne(id: string) {
+  // Find by ID with authorization check
+  async findOne(id: string, callingUser?: { sub: string }) {
+    if (callingUser?.sub && callingUser.sub !== id) {
+      const callingUserRecord = await this.prisma.user.findUnique({
+        where: { id: callingUser.sub },
+        select: { role: { select: { name: true } } },
+      });
+      const roleName = (callingUserRecord?.role?.name || '').toUpperCase();
+      const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
+        roleName,
+      );
+
+      if (!isSuperOrHr) {
+        const isTeamLead = await this.teamLeadAuthService.isTeamLead(
+          callingUser.sub,
+        );
+        if (isTeamLead) {
+          const isAdvisor =
+            await this.teamLeadAuthService.canTeamLeadAccessAdvisor(
+              callingUser.sub,
+              id,
+            );
+          if (!isAdvisor) {
+            throw new ForbiddenException(
+              'Access denied: You cannot view this user profile.',
+            );
+          }
+        }
+      }
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id },
       select: USER_SAFE_SELECT,
@@ -289,8 +462,8 @@ export class UsersService {
     const updatedUser = await this.prisma.user.update({
       where: { id: userId },
       data: {
-        firstName: dto.firstName,
-        lastName: dto.lastName,
+        firstName: dto.firstName !== undefined ? this.normalizeName(dto.firstName) : undefined,
+        lastName: dto.lastName !== undefined ? this.normalizeName(dto.lastName) : undefined,
         phone: dto.phone,
         alternatePhone: dto.alternatePhone,
         dob: dto.dob ? new Date(dto.dob) : undefined,
@@ -417,21 +590,30 @@ export class UsersService {
       }
     }
 
-    const updatedUser = await this.prisma.user.update({
-      where: { id },
-      data: {
-        firstName: updateUserDto.firstName,
-        lastName: updateUserDto.lastName,
-        email: updateUserDto.email,
-        phone: updateUserDto.phone,
-        alternatePhone: updateUserDto.alternatePhone,
-        dob: updateUserDto.dob ? new Date(updateUserDto.dob) : undefined,
-        roleId: updateUserDto.roleId,
-        teamId: updateUserDto.teamId,
-        managerId: updateUserDto.managerId,
-      },
-      select: USER_SAFE_SELECT,
-    });
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      if (
+        updateUserDto.teamId !== undefined &&
+        updateUserDto.teamId !== user.teamId
+      ) {
+        await processUserTeamTransfer(tx, id, updateUserDto.teamId);
+      }
+
+      return tx.user.update({
+        where: { id },
+        data: {
+          firstName: updateUserDto.firstName !== undefined ? this.normalizeName(updateUserDto.firstName) : undefined,
+          lastName: updateUserDto.lastName !== undefined ? this.normalizeName(updateUserDto.lastName) : undefined,
+          email: updateUserDto.email,
+          phone: updateUserDto.phone,
+          alternatePhone: updateUserDto.alternatePhone,
+          dob: updateUserDto.dob ? new Date(updateUserDto.dob) : undefined,
+          roleId: updateUserDto.roleId,
+          teamId: updateUserDto.teamId,
+          managerId: updateUserDto.managerId,
+        },
+        select: USER_SAFE_SELECT,
+      });
+    }, { maxWait: 10000, timeout: 30000 });
 
     if (currentUserId) {
       const userName =
@@ -505,11 +687,14 @@ export class UsersService {
       targetTeamName = team.name;
     }
 
-    const updatedUser = await this.prisma.user.update({
-      where: { id },
-      data: { teamId },
-      select: USER_SAFE_SELECT,
-    });
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      await processUserTeamTransfer(tx, id, teamId);
+
+      return tx.user.findUnique({
+        where: { id },
+        select: USER_SAFE_SELECT,
+      });
+    }, { maxWait: 10000, timeout: 30000 });
 
     if (currentUserId && existingUser.teamId !== teamId) {
       const userName =
@@ -557,22 +742,24 @@ export class UsersService {
     if (
       superAdminRole &&
       user.roleId === superAdminRole.id &&
-      user.status === UserStatus.ACTIVE &&
       status !== UserStatus.ACTIVE
     ) {
-      const activeSuperAdminCount = await this.countActiveSuperAdmins();
-      if (activeSuperAdminCount <= 1) {
-        throw new ConflictException(
-          'Cannot deactivate the only active Super Admin. System must have at least one active Super Admin.',
-        );
-      }
+      throw new ForbiddenException(
+        'Super Admin accounts cannot be deactivated.',
+      );
     }
 
-    const updatedUser = await this.prisma.user.update({
-      where: { id },
-      data: { status },
-      select: USER_SAFE_SELECT,
-    });
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      if (user.status === UserStatus.ACTIVE && status !== UserStatus.ACTIVE) {
+        await releaseUserLeadsToPool(tx, id);
+      }
+
+      return tx.user.update({
+        where: { id },
+        data: { status },
+        select: USER_SAFE_SELECT,
+      });
+    }, { maxWait: 10000, timeout: 30000 });
 
     if (currentUserId) {
       let description =
@@ -679,7 +866,7 @@ export class UsersService {
       });
 
       return newSuperAdmin;
-    });
+    }, { maxWait: 10000, timeout: 30000 });
   }
 
   // Deactivate user

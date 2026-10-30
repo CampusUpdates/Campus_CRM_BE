@@ -2,14 +2,22 @@ import {
   IsArray,
   IsEmail,
   IsEnum,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   Min,
+  ValidateIf,
+  IsNotEmpty,
+  Matches,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
-import { CourseType, Gender } from '@prisma/client';
+import { CourseType, Gender, LeadSource } from '@prisma/client';
+import { CreateCounsellingRequestItemDto } from './create-lead.dto';
 
 export class UpdateLeadDto {
   @IsOptional()
@@ -26,10 +34,12 @@ export class UpdateLeadDto {
 
   @IsOptional()
   @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Phone number must be exactly 10 digits' })
   phone?: string;
 
   @IsOptional()
   @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Alternate phone number must be exactly 10 digits' })
   alternatePhone?: string;
 
   @IsOptional()
@@ -50,6 +60,26 @@ export class UpdateLeadDto {
   @IsOptional()
   @IsString()
   state?: string;
+
+  // Preferred Study Location & Budget
+  @IsOptional()
+  @IsString()
+  preferredState?: string | null;
+
+  @IsOptional()
+  @IsString()
+  preferredCity?: string | null;
+
+  @IsOptional()
+  @ValidateIf((o) => o.preferredBudget !== undefined && o.preferredBudget !== null && o.preferredBudget !== '')
+  @Type(() => Number)
+  @IsNumber({}, { message: 'Preferred budget must be a valid number' })
+  @Min(0, { message: 'Preferred budget must be non-negative' })
+  preferredBudget?: number | null;
+
+  @IsOptional()
+  @IsString()
+  referredBy?: string | null;
 
   @IsOptional()
   @IsNumber()
@@ -75,6 +105,11 @@ export class UpdateLeadDto {
   @IsEnum(CourseType)
   courseInterested?: CourseType;
 
+  @ValidateIf((o) => o.courseInterested === CourseType.OTHER)
+  @IsNotEmpty({ message: 'Specify Course is required when course interested is Other' })
+  @IsString()
+  courseInterestedOther?: string;
+
   @IsOptional()
   @IsString()
   specializationInterested?: string;
@@ -83,4 +118,121 @@ export class UpdateLeadDto {
   @IsArray()
   @IsString({ each: true })
   collegeIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  negativeColleges?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateCounsellingRequestItemDto)
+  counsellingRequests?: CreateCounsellingRequestItemDto[];
+
+  // Family Information
+  @IsOptional()
+  @IsString()
+  fatherName?: string;
+
+  @IsOptional()
+  @IsString()
+  fatherOccupation?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Father phone number must be exactly 10 digits' })
+  fatherPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  aadharNumber?: string;
+
+  @IsOptional()
+  @IsString()
+  motherName?: string;
+
+  @IsOptional()
+  @IsString()
+  motherOccupation?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9]{10}$/, { message: 'Mother phone number must be exactly 10 digits' })
+  motherPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  physicalAddress?: string;
+
+  // 10th Academic Information
+  @IsOptional()
+  @IsString()
+  tenthSchoolName?: string;
+
+  @IsOptional()
+  @IsString()
+  tenthBoard?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1950)
+  @Max(2100)
+  tenthPassoutYear?: number;
+
+  // 12th Academic Information
+  @IsOptional()
+  @IsString()
+  twelfthSchoolName?: string;
+
+  @IsOptional()
+  @IsString()
+  twelfthBoard?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1950)
+  @Max(2100)
+  twelfthPassoutYear?: number;
+
+  // Graduation Information
+  @IsOptional()
+  @IsString()
+  graduationCollegeName?: string;
+
+
+  @IsOptional()
+  @IsString()
+  graduationUniversity?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1950)
+  @Max(2100)
+  graduationPassoutYear?: number;
+
+  // Calling / Notes
+  @IsOptional()
+  @IsString()
+  bestTimeToCall?: string;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+
+  @IsOptional()
+  @IsEnum(LeadSource)
+  source?: LeadSource;
+
+  @ValidateIf((o) => o.source === LeadSource.OTHER)
+  @IsNotEmpty({ message: 'Specify Lead Source is required when source is Other' })
+  @IsString()
+  sourceOther?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]+$/, {
+    message: 'Application ID can contain only letters, numbers, hyphens (-), and underscores (_).',
+  })
+  applicationId?: string;
 }

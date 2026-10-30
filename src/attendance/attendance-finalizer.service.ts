@@ -28,9 +28,16 @@ export class AttendanceFinalizerService {
       return;
     }
 
-    // 2. Find eligible users (Active)
+    // 2. Find eligible non-Super-Admin users (Active)
     const activeUsers = await this.prisma.user.findMany({
-      where: { status: 'ACTIVE' },
+      where: {
+        status: 'ACTIVE',
+        role: {
+          name: {
+            not: 'SUPER_ADMIN',
+          },
+        },
+      },
       select: { id: true },
     });
 

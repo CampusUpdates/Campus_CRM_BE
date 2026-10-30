@@ -11,15 +11,18 @@ import { UpdateTeamDto } from './dto/update-team.dto';
 
 import { ActivityLogService } from 'src/activity-log/activity-log.service';
 import { ActivityType } from '@prisma/client';
+import { TeamLeadAuthorizationService } from './team-lead-authorization.service';
+import { processUserTeamTransfer } from 'src/users/utils/team-transfer.util';
 
 @Injectable()
 export class TeamsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly activityLogService: ActivityLogService,
+    private readonly teamLeadAuthService: TeamLeadAuthorizationService,
   ) {}
 
-  // Find single team header details with authorization check for manager
+  // Find single team header details with authorization check
   async findOneForManager(teamIdStr: string, user: { sub: string }) {
     const teamId = parseInt(teamIdStr, 10);
     if (isNaN(teamId)) {
@@ -49,18 +52,18 @@ export class TeamsService {
       throw new NotFoundException('Team not found.');
     }
 
-    // Authorization check: manager must manage team OR user must be SUPER_ADMIN / HR
     const userRecord = await this.prisma.user.findUnique({
       where: { id: user.sub },
       select: { role: { select: { name: true } } },
     });
 
     const isManager = team.managerId === user.sub;
-    const isSuperOrHr = ['SUPER_ADMIN', 'HR'].includes(
-      userRecord?.role?.name || '',
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
+      (userRecord?.role?.name || '').toUpperCase(),
     );
+    const isTeamLead = await this.teamLeadAuthService.canTeamLeadAccessTeam(user.sub, teamId);
 
-    if (!isManager && !isSuperOrHr) {
+    if (!isManager && !isSuperOrHr && !isTeamLead) {
       throw new ForbiddenException('You do not have access to this team.');
     }
 
@@ -92,23 +95,34 @@ export class TeamsService {
       select: { teamId: true, role: { select: { name: true } } },
     });
 
-    const isManager =
-      team.managerId === user.sub || userRecord?.teamId === teamId;
     const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(
       (userRecord?.role?.name || '').toUpperCase(),
     );
+    const isManager = team.managerId === user.sub;
+    const isTeamLead = await this.teamLeadAuthService.canTeamLeadAccessTeam(user.sub, teamId);
 
-    if (!isManager && !isSuperOrHr) {
+    if (!isManager && !isSuperOrHr && !isTeamLead) {
       throw new ForbiddenException('You do not have access to this team.');
     }
 
-    const members = await this.prisma.user.findMany({
+    // Manager / Team Lead / HR / Super Admin view: return all team members
+    return this.prisma.user.findMany({
       where: {
         OR: [
           { teamId },
           ...(team.managerId ? [{ managerId: team.managerId }] : []),
         ],
         status: 'ACTIVE',
+        role: {
+          name: {
+            in: [
+              'PROGRAM_ADVISOR',
+              'Program Advisor',
+              'TEAM_LEAD',
+              'Team Lead',
+            ],
+          },
+        },
       },
       select: {
         id: true,
@@ -126,11 +140,9 @@ export class TeamsService {
         firstName: 'asc',
       },
     });
-
-    return members;
   }
 
-  // Find all teams with manager info and member count (scoped for Manager)
+  // Find all teams with manager info and member count (scoped for Manager & Team Lead)
   async findAll(user?: { sub: string }) {
     let whereClause: any = {};
     if (user?.sub) {
@@ -139,13 +151,20 @@ export class TeamsService {
         select: { teamId: true, role: { select: { name: true } } },
       });
       const roleName = (userRecord?.role?.name || '').toUpperCase();
-      if (!['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(roleName)) {
-        whereClause = {
-          OR: [
-            { managerId: user.sub },
-            ...(userRecord?.teamId ? [{ id: userRecord.teamId }] : []),
-          ],
-        };
+      const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+
+      if (!isSuperOrHr) {
+        const isTL = await this.teamLeadAuthService.isTeamLead(user.sub);
+        const assignedTeamIds = isTL
+          ? await this.teamLeadAuthService.getTeamLeadAssignedTeamIds(user.sub)
+          : [];
+
+        const orConditions: any[] = [{ managerId: user.sub }];
+        if (assignedTeamIds.length > 0) {
+          orConditions.push({ id: { in: assignedTeamIds } });
+        }
+
+        whereClause = { OR: orConditions };
       }
     }
 
@@ -185,26 +204,11 @@ export class TeamsService {
     const eligibleManagers = await this.prisma.user.findMany({
       where: {
         status: 'ACTIVE',
-        OR: [
-          {
-            role: {
-              name: {
-                in: ['SUPER_ADMIN', 'HR', 'Manager'],
-              },
-            },
+        role: {
+          name: {
+            in: ['MANAGER', 'Manager', 'manager'],
           },
-          {
-            role: {
-              permissions: {
-                some: {
-                  permission: {
-                    name: 'TEAM_MANAGE',
-                  },
-                },
-              },
-            },
-          },
-        ],
+        },
       },
       select: {
         id: true,
@@ -225,6 +229,20 @@ export class TeamsService {
     const eligibleMembers = await this.prisma.user.findMany({
       where: {
         status: 'ACTIVE',
+        role: {
+          name: {
+            in: [
+              'PROGRAM_ADVISOR',
+              'Program Advisor',
+              'PROGRAMADVISOR',
+              'PA',
+              'ADVISOR',
+              'TEAM_LEAD',
+              'Team Lead',
+              'TEAMLEAD',
+            ],
+          },
+        },
       },
       select: {
         id: true,
@@ -254,9 +272,16 @@ export class TeamsService {
     return eligibleMembers;
   }
 
-  // Create team with manager and members in ONE atomic Prisma $transaction (HR-only)
+  // Create team with manager and members in ONE atomic Prisma $transaction (HR/Super Admin only)
   async create(createTeamDto: CreateTeamDto, user?: { sub: string }) {
-    const { name, description, managerId, memberIds = [] } = createTeamDto;
+    const {
+      name,
+      description,
+      managerId,
+      memberIds = [],
+      teamLeadIds = [],
+      teamLeadAdvisorAssignments = [],
+    } = createTeamDto;
 
     if (user?.sub) {
       const creatorRecord = await this.prisma.user.findUnique({
@@ -271,23 +296,18 @@ export class TeamsService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      // 1. Check duplicate team name
+    return this.prisma.$transaction(
+      async (tx) => {
       const existingTeam = await tx.team.findUnique({
-        where: {
-          name,
-        },
+        where: { name },
       });
 
       if (existingTeam) {
         throw new ConflictException('Team name already exists.');
       }
 
-      // 2. Validate manager existence, active status, and eligibility
       const manager = await tx.user.findUnique({
-        where: {
-          id: managerId,
-        },
+        where: { id: managerId },
         select: {
           id: true,
           status: true,
@@ -316,31 +336,21 @@ export class TeamsService {
         throw new BadRequestException('Selected manager is inactive.');
       }
 
-      const hasTeamManagePerm =
-        ['SUPER_ADMIN', 'HR', 'Manager'].includes(manager.role.name) ||
-        manager.role.permissions.some(
-          (p) => p.permission.name === 'TEAM_MANAGE',
-        );
-
-      if (!hasTeamManagePerm) {
+      const roleClean = (manager.role?.name || '').toUpperCase();
+      if (roleClean !== 'MANAGER') {
         throw new BadRequestException(
-          'Selected user is not eligible to manage teams.',
+          'Selected user is not eligible to manage teams. Must have MANAGER role.',
         );
       }
 
-      // 3. Validate members if any are selected
+      if (memberIds.includes(managerId)) {
+        throw new BadRequestException('Manager cannot be a team member.');
+      }
+
       if (memberIds.length > 0) {
         const members = await tx.user.findMany({
-          where: {
-            id: {
-              in: memberIds,
-            },
-          },
-          select: {
-            id: true,
-            status: true,
-            teamId: true,
-          },
+          where: { id: { in: memberIds } },
+          select: { id: true, status: true, teamId: true, role: { select: { name: true } } },
         });
 
         if (members.length !== memberIds.length) {
@@ -362,9 +372,50 @@ export class TeamsService {
             'One or more selected users already belong to another team.',
           );
         }
+
+        const invalidRoleMember = members.find((m) => {
+          const roleClean = (m.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+          return !['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR', 'TEAM_LEAD', 'TEAMLEAD'].includes(roleClean);
+        });
+        if (invalidRoleMember) {
+          throw new BadRequestException('One or more selected members have an invalid role (must be Program Advisor or Team Lead).');
+        }
       }
 
-      // 4. Create Team record
+      if (teamLeadIds.length > 0) {
+        const teamLeads = await tx.user.findMany({
+          where: { id: { in: teamLeadIds } },
+          select: {
+            id: true,
+            status: true,
+            role: { select: { name: true } },
+          },
+        });
+
+        if (teamLeads.length !== teamLeadIds.length) {
+          throw new BadRequestException(
+            'One or more selected Team Leads do not exist.',
+          );
+        }
+
+        const inactiveTL = teamLeads.find((tl) => tl.status !== 'ACTIVE');
+        if (inactiveTL) {
+          throw new BadRequestException(
+            'One or more selected Team Leads are inactive.',
+          );
+        }
+
+        const invalidRoleTL = teamLeads.find((tl) => {
+          const roleClean = (tl.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+          return !['TEAM_LEAD', 'TEAMLEAD'].includes(roleClean);
+        });
+        if (invalidRoleTL) {
+          throw new BadRequestException(
+            'One or more selected users do not have the Team Lead role.',
+          );
+        }
+      }
+
       const createdTeam = await tx.team.create({
         data: {
           name,
@@ -373,47 +424,97 @@ export class TeamsService {
         },
       });
 
-      // 5. Assign teamId to selected members
       if (memberIds.length > 0) {
-        await tx.user.updateMany({
-          where: {
-            id: {
-              in: memberIds,
-            },
-          },
-          data: {
-            teamId: createdTeam.id,
-          },
-        });
+        for (const memberId of memberIds) {
+          await processUserTeamTransfer(tx, memberId, createdTeam.id);
+        }
       }
 
-      // 6. Return created Team with manager, members, and member count
+      if (teamLeadIds.length > 0) {
+        for (const tlId of teamLeadIds) {
+          await tx.teamLead.upsert({
+            where: { teamId_userId: { teamId: createdTeam.id, userId: tlId } },
+            create: { teamId: createdTeam.id, userId: tlId },
+            update: {},
+          });
+        }
+      }
+
+      if (teamLeadAdvisorAssignments.length > 0) {
+        for (const assign of teamLeadAdvisorAssignments) {
+          if (!teamLeadIds.includes(assign.teamLeadId)) {
+            throw new BadRequestException(
+              'Assigned Team Lead must belong to the team.',
+            );
+          }
+
+          if (assign.advisorIds.length > 0) {
+            const advisors = await tx.user.findMany({
+              where: { id: { in: assign.advisorIds } },
+              select: {
+                id: true,
+                status: true,
+                teamId: true,
+                role: { select: { name: true } },
+              },
+            });
+
+            if (advisors.length !== assign.advisorIds.length) {
+              throw new BadRequestException(
+                'One or more selected Program Advisors do not exist.',
+              );
+            }
+
+            for (const adv of advisors) {
+              if (adv.status !== 'ACTIVE') {
+                throw new BadRequestException(
+                  'One or more selected Program Advisors are inactive.',
+                );
+              }
+              const roleClean = (adv.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+              if (
+                !['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR'].includes(
+                  roleClean,
+                )
+              ) {
+                throw new BadRequestException(
+                  'One or more selected users do not have the Program Advisor role.',
+                );
+              }
+              if (!memberIds.includes(adv.id) && adv.teamId !== createdTeam.id) {
+                throw new BadRequestException(
+                  'Program Advisor does not belong to the same team.',
+                );
+              }
+
+              await tx.teamLeadAdvisor.upsert({
+                where: {
+                  teamLeadId_advisorId: {
+                    teamLeadId: assign.teamLeadId,
+                    advisorId: adv.id,
+                  },
+                },
+                create: {
+                  teamLeadId: assign.teamLeadId,
+                  advisorId: adv.id,
+                },
+                update: {},
+              });
+            }
+          }
+        }
+      }
+
       const teamResult = await tx.team.findUnique({
-        where: {
-          id: createdTeam.id,
-        },
+        where: { id: createdTeam.id },
         include: {
           manager: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-            },
+            select: { id: true, firstName: true, lastName: true, email: true },
           },
           users: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-            },
+            select: { id: true, firstName: true, lastName: true, email: true },
           },
-          _count: {
-            select: {
-              users: true,
-            },
-          },
+          _count: { select: { users: true } },
         },
       });
 
@@ -426,10 +527,10 @@ export class TeamsService {
         ...rest,
         memberCount: _count.users,
       };
-    });
+    }, { maxWait: 10000, timeout: 60000 });
   }
 
-  // Update Team (atomic transaction for team details, manager, member unassignment/reassignment, and ActivityLog)
+  // Update Team (atomic transaction)
   async update(
     teamIdStr: string,
     updateTeamDto: UpdateTeamDto,
@@ -455,18 +556,13 @@ export class TeamsService {
 
     const team = await this.prisma.team.findUnique({
       where: { id: teamId },
-      include: {
-        users: {
-          select: { id: true },
-        },
-      },
+      include: { users: { select: { id: true } } },
     });
 
     if (!team) {
       throw new NotFoundException('Team not found.');
     }
 
-    // 1. Validate team name uniqueness if updated
     if (updateTeamDto.name && updateTeamDto.name.trim() !== team.name) {
       const existingName = await this.prisma.team.findUnique({
         where: { name: updateTeamDto.name.trim() },
@@ -476,7 +572,6 @@ export class TeamsService {
       }
     }
 
-    // 2. Validate manager if updated
     if (updateTeamDto.managerId && updateTeamDto.managerId !== team.managerId) {
       const manager = await this.prisma.user.findUnique({
         where: { id: updateTeamDto.managerId },
@@ -489,9 +584,7 @@ export class TeamsService {
               permissions: {
                 select: {
                   permission: {
-                    select: {
-                      name: true,
-                    },
+                    select: { name: true },
                   },
                 },
               },
@@ -508,20 +601,20 @@ export class TeamsService {
         throw new BadRequestException('Selected manager is inactive.');
       }
 
-      const hasTeamManagePerm =
-        ['SUPER_ADMIN', 'HR', 'Manager'].includes(manager.role.name) ||
-        manager.role.permissions.some(
-          (p) => p.permission.name === 'TEAM_MANAGE',
-        );
-
-      if (!hasTeamManagePerm) {
+      const roleClean = (manager.role?.name || '').toUpperCase();
+      if (roleClean !== 'MANAGER') {
         throw new BadRequestException(
-          'Selected user is not eligible to manage teams.',
+          'Selected user is not eligible to manage teams. Must have MANAGER role.',
         );
       }
     }
 
-    // 3. Calculate member delta if memberIds provided
+    const currentManagerId = updateTeamDto.managerId || team.managerId;
+    const finalMemberIds = updateTeamDto.memberIds !== undefined ? updateTeamDto.memberIds : team.users.map(u => u.id);
+    if (finalMemberIds.includes(currentManagerId)) {
+      throw new BadRequestException('Manager cannot be a team member.');
+    }
+
     const currentMemberIds = team.users.map((u) => u.id);
     let addedMemberIds: string[] = [];
     let removedMemberIds: string[] = [];
@@ -538,7 +631,7 @@ export class TeamsService {
       if (addedMemberIds.length > 0) {
         const addedUsers = await this.prisma.user.findMany({
           where: { id: { in: addedMemberIds } },
-          select: { id: true, status: true },
+          select: { id: true, status: true, role: { select: { name: true } } },
         });
 
         if (addedUsers.length !== addedMemberIds.length) {
@@ -553,12 +646,19 @@ export class TeamsService {
             'One or more selected users are inactive.',
           );
         }
+
+        const invalidRoleMember = addedUsers.find((m) => {
+          const roleClean = (m.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+          return !['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR', 'TEAM_LEAD', 'TEAMLEAD'].includes(roleClean);
+        });
+        if (invalidRoleMember) {
+          throw new BadRequestException('One or more selected members have an invalid role (must be Program Advisor or Team Lead).');
+        }
       }
     }
 
-    // 4. Atomic Transaction execution using SAME transaction client tx
-    return this.prisma.$transaction(async (tx) => {
-      // A. Update team details
+    return this.prisma.$transaction(
+      async (tx) => {
       const updateData: any = {};
       if (updateTeamDto.name !== undefined) {
         updateData.name = updateTeamDto.name.trim();
@@ -577,31 +677,153 @@ export class TeamsService {
         });
       }
 
-      // B. Remove users no longer in this team (set teamId = null)
       if (
         updateTeamDto.memberIds !== undefined &&
         removedMemberIds.length > 0
       ) {
-        await tx.user.updateMany({
-          where: {
-            id: { in: removedMemberIds },
-            teamId: teamId,
-          },
-          data: { teamId: null },
-        });
+        for (const removedId of removedMemberIds) {
+          await processUserTeamTransfer(tx, removedId, null);
+        }
       }
 
-      // C. Assign newly added users to this team (set teamId = teamId)
       if (updateTeamDto.memberIds !== undefined && addedMemberIds.length > 0) {
-        await tx.user.updateMany({
-          where: {
-            id: { in: addedMemberIds },
-          },
-          data: { teamId: teamId },
-        });
+        for (const addedId of addedMemberIds) {
+          await processUserTeamTransfer(tx, addedId, teamId);
+        }
       }
 
-      // D. Create ActivityLog using SAME tx client
+      if (updateTeamDto.teamLeadIds !== undefined) {
+        const currentTLs = await tx.teamLead.findMany({
+          where: { teamId },
+          select: { userId: true },
+        });
+        const currentTLIds = currentTLs.map((tl) => tl.userId);
+        const requestedTLIds = updateTeamDto.teamLeadIds;
+
+        const addedTLIds = requestedTLIds.filter(
+          (id) => !currentTLIds.includes(id),
+        );
+        const removedTLIds = currentTLIds.filter(
+          (id) => !requestedTLIds.includes(id),
+        );
+
+        for (const removedTlId of removedTLIds) {
+          await tx.teamLead.deleteMany({
+            where: { teamId, userId: removedTlId },
+          });
+
+          const teamAdvisors = await tx.user.findMany({
+            where: { teamId },
+            select: { id: true },
+          });
+          const advIds = teamAdvisors.map((a) => a.id);
+          if (advIds.length > 0) {
+            await tx.teamLeadAdvisor.deleteMany({
+              where: {
+                teamLeadId: removedTlId,
+                advisorId: { in: advIds },
+              },
+            });
+          }
+        }
+
+        if (addedTLIds.length > 0) {
+          const addedTLs = await tx.user.findMany({
+            where: { id: { in: addedTLIds } },
+            select: {
+              id: true,
+              status: true,
+              role: { select: { name: true } },
+            },
+          });
+          if (addedTLs.length !== addedTLIds.length) {
+            throw new BadRequestException(
+              'One or more selected Team Leads do not exist.',
+            );
+          }
+          for (const tl of addedTLs) {
+            if (tl.status !== 'ACTIVE') {
+              throw new BadRequestException(
+                'One or more selected Team Leads are inactive.',
+              );
+            }
+            const roleClean = (tl.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+            if (!['TEAM_LEAD', 'TEAMLEAD'].includes(roleClean)) {
+              throw new BadRequestException(
+                'One or more selected users do not have the Team Lead role.',
+              );
+            }
+            await tx.teamLead.upsert({
+              where: { teamId_userId: { teamId, userId: tl.id } },
+              create: { teamId, userId: tl.id },
+              update: {},
+            });
+          }
+        }
+      }
+
+      if (updateTeamDto.teamLeadAdvisorAssignments !== undefined) {
+        for (const assign of updateTeamDto.teamLeadAdvisorAssignments) {
+          const isTLAssigned = await tx.teamLead.findUnique({
+            where: { teamId_userId: { teamId, userId: assign.teamLeadId } },
+          });
+          if (!isTLAssigned) {
+            throw new BadRequestException(
+              'Assigned Team Lead is not assigned to this team.',
+            );
+          }
+
+          if (assign.advisorIds.length > 0) {
+            const advisors = await tx.user.findMany({
+              where: { id: { in: assign.advisorIds } },
+              select: {
+                id: true,
+                status: true,
+                teamId: true,
+                role: { select: { name: true } },
+              },
+            });
+            if (advisors.length !== assign.advisorIds.length) {
+              throw new BadRequestException(
+                'One or more selected Program Advisors do not exist.',
+              );
+            }
+            for (const adv of advisors) {
+              if (adv.status !== 'ACTIVE') {
+                throw new BadRequestException(
+                  'One or more selected Program Advisors are inactive.',
+                );
+              }
+              const roleClean = (adv.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+              if (
+                !['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR'].includes(
+                  roleClean,
+                )
+              ) {
+                throw new BadRequestException(
+                  'One or more selected users do not have the Program Advisor role.',
+                );
+              }
+              if (adv.teamId !== teamId) {
+                throw new BadRequestException(
+                  'Program Advisor does not belong to this team.',
+                );
+              }
+              await tx.teamLeadAdvisor.upsert({
+                where: {
+                  teamLeadId_advisorId: {
+                    teamLeadId: assign.teamLeadId,
+                    advisorId: adv.id,
+                  },
+                },
+                create: { teamLeadId: assign.teamLeadId, advisorId: adv.id },
+                update: {},
+              });
+            }
+          }
+        }
+      }
+
       if (user?.sub) {
         let desc = `Updated team ${updateTeamDto.name || team.name}.`;
         if (updateTeamDto.memberIds !== undefined) {
@@ -618,31 +840,16 @@ export class TeamsService {
         });
       }
 
-      // E. Fetch updated team object
       const updatedTeam = await tx.team.findUnique({
         where: { id: teamId },
         include: {
           manager: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-            },
+            select: { id: true, firstName: true, lastName: true, email: true },
           },
           users: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-            },
+            select: { id: true, firstName: true, lastName: true, email: true },
           },
-          _count: {
-            select: {
-              users: true,
-            },
-          },
+          _count: { select: { users: true } },
         },
       });
 
@@ -655,10 +862,10 @@ export class TeamsService {
         ...rest,
         memberCount: _count.users,
       };
-    });
+    }, { maxWait: 10000, timeout: 60000 });
   }
 
-  // Safe Permanent Team Deletion (unassigns members and deletes team in 1 atomic transaction)
+  // Safe Permanent Team Deletion
   async remove(teamIdStr: string, user?: { sub: string }) {
     const teamId = parseInt(teamIdStr, 10);
     if (isNaN(teamId)) {
@@ -670,11 +877,7 @@ export class TeamsService {
       select: {
         id: true,
         name: true,
-        _count: {
-          select: {
-            users: true,
-          },
-        },
+        _count: { select: { users: true } },
       },
     });
 
@@ -684,14 +887,16 @@ export class TeamsService {
 
     const affectedCount = team._count.users;
 
-    await this.prisma.$transaction(async (tx) => {
-      // 1. Unassign all members of this team
-      await tx.user.updateMany({
+    await this.prisma.$transaction(
+      async (tx) => {
+      const teamMembers = await tx.user.findMany({
         where: { teamId },
-        data: { teamId: null },
+        select: { id: true },
       });
+      for (const member of teamMembers) {
+        await processUserTeamTransfer(tx, member.id, null);
+      }
 
-      // 2. Create ActivityLog using the SAME transaction client tx
       if (user?.sub) {
         await tx.activityLog.create({
           data: {
@@ -699,23 +904,300 @@ export class TeamsService {
             activity: ActivityType.TEAM,
             entityType: 'TEAM',
             entityId: String(teamId),
-            description: `Permanently deleted team ${team.name}. ${affectedCount} employee${
-              affectedCount === 1 ? '' : 's'
-            } moved to Unassigned.`,
+            description: `Permanently deleted team ${team.name}. ${affectedCount} employee${affectedCount === 1 ? '' : 's'
+              } moved to Unassigned.`,
           },
         });
       }
 
-      // 3. Delete Team
       await tx.team.delete({
         where: { id: teamId },
       });
-    });
+    }, { maxWait: 10000, timeout: 60000 });
 
     return {
-      message: `Permanently deleted team ${team.name}. ${affectedCount} employee${
-        affectedCount === 1 ? '' : 's'
-      } moved to Unassigned.`,
+      message: `Permanently deleted team ${team.name}. ${affectedCount} employee${affectedCount === 1 ? '' : 's'
+        } moved to Unassigned.`,
     };
+  }
+
+  // Helper to assert caller has Manager/HR/SuperAdmin authority for a Team
+  private async assertTeamManagerOrAdmin(teamId: number, callerId: string) {
+    const team = await this.prisma.team.findUnique({
+      where: { id: teamId },
+      select: { managerId: true },
+    });
+    if (!team) {
+      throw new NotFoundException('Team not found.');
+    }
+
+    const userRecord = await this.prisma.user.findUnique({
+      where: { id: callerId },
+      select: { role: { select: { name: true } } },
+    });
+
+    const roleName = (userRecord?.role?.name || '').toUpperCase();
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+    const isManager = team.managerId === callerId;
+
+    if (!isManager && !isSuperOrHr) {
+      throw new ForbiddenException(
+        'Only Team Manager, HR personnel, or Super Admin can manage Team Leads.',
+      );
+    }
+    return team;
+  }
+
+  // Assign Team Lead to Team
+  async assignTeamLead(teamIdStr: string, targetUserId: string, caller: { sub: string }) {
+    const teamId = parseInt(teamIdStr, 10);
+    if (isNaN(teamId)) throw new BadRequestException('Invalid team ID.');
+
+    await this.assertTeamManagerOrAdmin(teamId, caller.sub);
+
+    const targetUser = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true, status: true, role: { select: { name: true } } },
+    });
+
+    if (!targetUser) throw new NotFoundException('Target user not found.');
+    if (targetUser.status !== 'ACTIVE') throw new BadRequestException('Target user is inactive.');
+
+    const roleName = (targetUser.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    if (!['TEAM_LEAD', 'TEAMLEAD'].includes(roleName)) {
+      throw new BadRequestException('Target user does not have the Team Lead role.');
+    }
+
+    return this.prisma.teamLead.upsert({
+      where: { teamId_userId: { teamId, userId: targetUserId } },
+      create: { teamId, userId: targetUserId },
+      update: {},
+    });
+  }
+
+  // Remove Team Lead from Team
+  async removeTeamLead(teamIdStr: string, targetUserId: string, caller: { sub: string }) {
+    const teamId = parseInt(teamIdStr, 10);
+    if (isNaN(teamId)) throw new BadRequestException('Invalid team ID.');
+
+    await this.assertTeamManagerOrAdmin(teamId, caller.sub);
+
+    const record = await this.prisma.teamLead.findUnique({
+      where: { teamId_userId: { teamId, userId: targetUserId } },
+    });
+
+    if (!record) {
+      throw new NotFoundException('Team Lead assignment not found for this team.');
+    }
+
+    // Clean up TeamLeadAdvisor records for this team lead and advisors in this team
+    const teamAdvisors = await this.prisma.user.findMany({
+      where: { teamId },
+      select: { id: true },
+    });
+    const advisorIds = teamAdvisors.map((a) => a.id);
+
+    if (advisorIds.length > 0) {
+      await this.prisma.teamLeadAdvisor.deleteMany({
+        where: {
+          teamLeadId: targetUserId,
+          advisorId: { in: advisorIds },
+        },
+      });
+    }
+
+    return this.prisma.teamLead.delete({
+      where: { teamId_userId: { teamId, userId: targetUserId } },
+    });
+  }
+
+  // Get Team Leads of a Team
+  async getTeamLeads(teamIdStr: string, caller: { sub: string }) {
+    const teamId = parseInt(teamIdStr, 10);
+    if (isNaN(teamId)) throw new BadRequestException('Invalid team ID.');
+
+    const team = await this.prisma.team.findUnique({
+      where: { id: teamId },
+      select: { managerId: true },
+    });
+    if (!team) throw new NotFoundException('Team not found.');
+
+    const callerRecord = await this.prisma.user.findUnique({
+      where: { id: caller.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = (callerRecord?.role?.name || '').toUpperCase();
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+    const isManager = team.managerId === caller.sub;
+    const isTeamLead = await this.teamLeadAuthService.canTeamLeadAccessTeam(caller.sub, teamId);
+
+    if (!isManager && !isSuperOrHr && !isTeamLead) {
+      throw new ForbiddenException('Access denied to view Team Leads for this team.');
+    }
+
+    const teamLeads = await this.prisma.teamLead.findMany({
+      where: { teamId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            status: true,
+            role: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+
+    return teamLeads.map((tl) => tl.user);
+  }
+
+  // Assign Program Advisor to Team Lead
+  async assignAdvisorToTeamLead(
+    teamIdStr: string,
+    teamLeadId: string,
+    advisorId: string,
+    caller: { sub: string },
+  ) {
+    const teamId = parseInt(teamIdStr, 10);
+    if (isNaN(teamId)) throw new BadRequestException('Invalid team ID.');
+
+    await this.assertTeamManagerOrAdmin(teamId, caller.sub);
+
+    const isTLAssigned = await this.teamLeadAuthService.canTeamLeadAccessTeam(teamLeadId, teamId);
+    if (!isTLAssigned) {
+      throw new BadRequestException('Team Lead is not assigned to this team.');
+    }
+
+    const advisor = await this.prisma.user.findUnique({
+      where: { id: advisorId },
+      select: {
+        id: true,
+        status: true,
+        teamId: true,
+        role: { select: { name: true } },
+      },
+    });
+
+    if (!advisor) throw new NotFoundException('Target advisor not found.');
+    if (advisor.status !== 'ACTIVE') throw new BadRequestException('Target advisor is inactive.');
+
+    const advisorRole = (advisor.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    if (!['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR'].includes(advisorRole)) {
+      throw new BadRequestException('Target user is not a Program Advisor.');
+    }
+
+    if (advisor.teamId !== teamId) {
+      throw new BadRequestException('Program Advisor does not belong to this team.');
+    }
+
+    return this.prisma.teamLeadAdvisor.upsert({
+      where: { teamLeadId_advisorId: { teamLeadId, advisorId } },
+      create: { teamLeadId, advisorId },
+      update: {},
+    });
+  }
+
+  // Remove Program Advisor from Team Lead
+  async removeAdvisorFromTeamLead(
+    teamIdStr: string,
+    teamLeadId: string,
+    advisorId: string,
+    caller: { sub: string },
+  ) {
+    const teamId = parseInt(teamIdStr, 10);
+    if (isNaN(teamId)) throw new BadRequestException('Invalid team ID.');
+
+    await this.assertTeamManagerOrAdmin(teamId, caller.sub);
+
+    const isTLAssigned = await this.teamLeadAuthService.canTeamLeadAccessTeam(teamLeadId, teamId);
+    if (!isTLAssigned) {
+      throw new BadRequestException('Team Lead is not assigned to this team.');
+    }
+
+    const advisor = await this.prisma.user.findUnique({
+      where: { id: advisorId },
+      select: { teamId: true },
+    });
+    if (!advisor || advisor.teamId !== teamId) {
+      throw new BadRequestException('Advisor does not belong to requested team.');
+    }
+
+    const rel = await this.prisma.teamLeadAdvisor.findUnique({
+      where: { teamLeadId_advisorId: { teamLeadId, advisorId } },
+    });
+
+    if (!rel) {
+      throw new NotFoundException('Team Lead Advisor relationship does not exist.');
+    }
+
+    return this.prisma.teamLeadAdvisor.delete({
+      where: { teamLeadId_advisorId: { teamLeadId, advisorId } },
+    });
+  }
+
+  // Get Program Advisors supervised by a Team Lead
+  async getTeamLeadAdvisors(
+    teamIdStr: string,
+    targetTeamLeadId: string,
+    caller: { sub: string },
+  ) {
+    const teamId = parseInt(teamIdStr, 10);
+    if (isNaN(teamId)) throw new BadRequestException('Invalid team ID.');
+
+    const isTLAssigned = await this.teamLeadAuthService.canTeamLeadAccessTeam(targetTeamLeadId, teamId);
+    if (!isTLAssigned) {
+      throw new NotFoundException('Target Team Lead is not assigned to this team.');
+    }
+
+    const team = await this.prisma.team.findUnique({
+      where: { id: teamId },
+      select: { managerId: true },
+    });
+    if (!team) throw new NotFoundException('Team not found.');
+
+    const callerRecord = await this.prisma.user.findUnique({
+      where: { id: caller.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = (callerRecord?.role?.name || '').toUpperCase();
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+    const isManager = team.managerId === caller.sub;
+    const isSelf = caller.sub === targetTeamLeadId;
+
+    if (!isManager && !isSuperOrHr && !isSelf) {
+      throw new ForbiddenException(
+        'You are not authorized to view another Team Lead\'s supervised advisors.',
+      );
+    }
+
+    const records = await this.prisma.teamLeadAdvisor.findMany({
+      where: {
+        teamLeadId: targetTeamLeadId,
+        advisor: {
+          teamId, // Query-level filter!
+          status: 'ACTIVE',
+        },
+      },
+      include: {
+        advisor: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            teamId: true,
+            status: true,
+            role: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+
+    return records.map((r) => r.advisor);
   }
 }

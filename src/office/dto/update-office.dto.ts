@@ -41,6 +41,10 @@ export class UpdateOfficeDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  locationValidationEnabled?: boolean;
 }
 
 export class UpdateOfficeStatusDto {

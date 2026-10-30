@@ -23,7 +23,7 @@ import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-req
 @Controller('office')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class OfficeController {
-  constructor(private readonly officeService: OfficeService) {}
+  constructor(private readonly officeService: OfficeService) { }
 
   @RequirePermission('OFFICE_MANAGE')
   @Get()

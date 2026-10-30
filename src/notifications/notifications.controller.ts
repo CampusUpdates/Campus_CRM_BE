@@ -1,13 +1,18 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
   Param,
   Patch,
+  Post,
   Query,
   Req,
+  Sse,
   UseGuards,
+  MessageEvent,
 } from '@nestjs/common';
+import { Observable } from 'rxjs';
 import {
   NotificationsService,
   GetNotificationsQueryDto,
@@ -20,9 +25,27 @@ import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-req
 export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}
 
+  @Sse('stream')
+  stream(@Req() req: AuthenticatedRequest): Observable<MessageEvent> {
+    return this.notificationsService.getUserStream(req.user.sub);
+  }
+
   @Get('unread-count')
   getUnreadCount(@Req() req: AuthenticatedRequest) {
     return this.notificationsService.getUnreadCount(req.user.sub);
+  }
+
+  @Get('sidebar-indicators')
+  getSidebarIndicators(@Req() req: AuthenticatedRequest) {
+    return this.notificationsService.getSidebarIndicators(req.user.sub);
+  }
+
+  @Post('module-seen')
+  markModuleSeen(
+    @Body('module') module: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.notificationsService.markModuleSeen(req.user.sub, module);
   }
 
   @Get()

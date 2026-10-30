@@ -72,6 +72,59 @@ export class FilterStudentDataDto {
   search?: string;
 
   @IsOptional()
+  @IsString()
+  disposition?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (!value) return undefined;
+    if (Array.isArray(value))
+      return value.map((v) => String(v).trim()).filter(Boolean);
+    if (typeof value === 'string')
+      return value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    return [String(value)];
+  })
+  @IsArray()
+  @IsString({ each: true })
+  dispositions?: string[];
+
+  @IsOptional()
+  @IsString()
+  calledById?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (!value) return undefined;
+    if (Array.isArray(value))
+      return value.map((v) => String(v).trim()).filter(Boolean);
+    if (typeof value === 'string')
+      return value
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    return [String(value)];
+  })
+  @IsArray()
+  @IsString({ each: true })
+  notCalledByUserIds?: string[];
+
+  @IsOptional()
+  @IsString()
+  time?: string;
+
+  @IsOptional()
+  @IsString()
+  fromDate?: string;
+
+  @IsOptional()
+  @IsString()
+  toDate?: string;
+
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)

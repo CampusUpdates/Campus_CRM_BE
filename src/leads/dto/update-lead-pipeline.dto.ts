@@ -6,6 +6,7 @@ import {
   ValidateNested,
   IsNumber,
   Min,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -78,6 +79,13 @@ export class UpdateLeadPipelineDto {
 
   @IsOptional()
   @IsString()
+  leadCollegeId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]+$/, {
+    message: 'Application ID can contain only letters, numbers, hyphens (-), and underscores (_).',
+  })
   applicationId?: string;
 
   @IsOptional()

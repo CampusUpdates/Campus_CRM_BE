@@ -23,7 +23,49 @@ export class AuthService {
     private readonly officeService: OfficeService,
     private readonly geofenceService: GeofenceService,
     private readonly classificationService: AttendanceClassificationService,
-  ) {}
+  ) { }
+
+  // Get system-wide location validation status
+  async getLocationStatus() {
+    const isEnabled = await this.officeService.isLocationValidationEnabled();
+    return {
+      locationValidationEnabled: isEnabled,
+    };
+  }
+
+  // Record / update today's attendance record safely using unique constraint
+  private async recordAttendance(
+    userId: string,
+    officeId: number,
+    policy: any | null,
+  ) {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const loginTime = new Date();
+    const status = policy
+      ? this.classificationService.classifyAttendance(loginTime, policy)
+      : 'PRESENT';
+
+    try {
+      await this.prisma.attendance.create({
+        data: {
+          userId: userId,
+          officeId: officeId,
+          date: startOfToday,
+          checkIn: loginTime,
+          status: status,
+        },
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        // A concurrent or prior login today has already successfully created the record.
+        // Safely ignore to ensure the FIRST login's status is preserved.
+      } else {
+        throw error;
+      }
+    }
+  }
 
   // Login
   async login(loginDto: LoginDto) {
@@ -69,7 +111,20 @@ export class AuthService {
       (rp) => rp.permission.name === 'BYPASS_OFFICE_VALIDATION',
     );
 
-    if (!hasBypassPermission) {
+    // Query persisted Location Validation setting
+    const isLocationValidationEnabled =
+      await this.officeService.isLocationValidationEnabled();
+
+    if (!hasBypassPermission && isLocationValidationEnabled) {
+      const activeOffices =
+        await this.officeService.findActiveConfiguredOffices();
+
+      if (!activeOffices || activeOffices.length === 0) {
+        throw new UnauthorizedException(
+          'Location validation is enabled, but no active office with coordinates is configured.',
+        );
+      }
+
       // Validate latitude and longitude were sent by client
       if (
         loginDto.latitude === undefined ||
@@ -81,19 +136,10 @@ export class AuthService {
         isNaN(loginDto.latitude) ||
         isNaN(loginDto.longitude)
       ) {
-        throw new UnauthorizedException(
-          'Location permission is required to log in.',
-        );
-      }
-
-      // Fetch active offices with configured coordinates
-      const activeOffices =
-        await this.officeService.findActiveConfiguredOffices();
-
-      if (!activeOffices || activeOffices.length === 0) {
-        throw new UnauthorizedException(
-          'Your current location could not be verified.',
-        );
+        throw new UnauthorizedException({
+          locationRequired: true,
+          message: 'Location permission is required to log in.',
+        });
       }
 
       // Find nearest office where user is inside radius
@@ -120,34 +166,26 @@ export class AuthService {
         );
       }
 
-      // Record / update today's attendance record safely using unique constraint
-      const startOfToday = new Date();
-      startOfToday.setHours(0, 0, 0, 0);
+      await this.recordAttendance(user.id, matched.office.id, policy);
+    } else {
+      // Location Validation is DISABLED or user HAS BYPASS_OFFICE_VALIDATION permission
+      const activeOffices =
+        await this.officeService.findActiveConfiguredOffices();
+      const targetOffice =
+        (activeOffices && activeOffices.length > 0 ? activeOffices[0] : null) ||
+        (await this.prisma.office.findFirst({ where: { isActive: true } })) ||
+        (await this.prisma.office.findFirst());
 
-      const loginTime = new Date();
-      const status = this.classificationService.classifyAttendance(
-        loginTime,
-        policy,
-      );
-
-      try {
-        await this.prisma.attendance.create({
-          data: {
-            userId: user.id,
-            officeId: matched.office.id,
-            date: startOfToday,
-            checkIn: loginTime,
-            status: status,
-          },
+      if (targetOffice) {
+        const policy = await this.prisma.attendancePolicy.findUnique({
+          where: { officeId: targetOffice.id },
         });
-      } catch (error) {
-        // P2002: Unique constraint failed on the fields: (`userId`,`date`)
-        if (error.code === 'P2002') {
-          // A concurrent or prior login today has already successfully created the record.
-          // We safely ignore this to ensure the FIRST login's status is preserved.
-        } else {
-          throw error;
-        }
+
+        await this.recordAttendance(
+          user.id,
+          targetOffice.id,
+          policy && policy.isActive ? policy : null,
+        );
       }
     }
 
@@ -172,6 +210,7 @@ export class AuthService {
       firstName: user.firstName,
       lastName: user.lastName,
       roleId: user.roleId,
+      roleName: user.role?.name,
       teamId: user.teamId,
       type: 'access',
     };

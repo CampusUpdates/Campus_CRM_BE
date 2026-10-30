@@ -15,7 +15,7 @@ export class OfficeService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly activityLogService: ActivityLogService,
-  ) {}
+  ) { }
 
   // Coordinate and Radius Server-Side Validator
   private validateCoordinatesAndRadius(
@@ -59,6 +59,43 @@ export class OfficeService {
         throw new BadRequestException('Radius must be a positive integer.');
       }
     }
+  }
+
+  // Check if system location validation is enabled
+  async isLocationValidationEnabled(): Promise<boolean> {
+    const enabledOffice = await this.prisma.office.findFirst({
+      where: {
+        isActive: true,
+        locationValidationEnabled: true,
+        latitude: { not: null },
+        longitude: { not: null },
+      },
+    });
+    return !!enabledOffice;
+  }
+
+  // Toggle global system location validation setting across offices
+  async toggleGlobalLocationValidation(enabled: boolean, currentUserId?: string) {
+    await this.prisma.office.updateMany({
+      data: {
+        locationValidationEnabled: enabled,
+      },
+    });
+
+    if (currentUserId) {
+      await this.activityLogService.createLog({
+        userId: currentUserId,
+        activity: ActivityType.ATTENDANCE,
+        entityType: 'OFFICE',
+        entityId: 'GLOBAL',
+        description: `Toggled system Location Validation to ${enabled ? 'ENABLED' : 'DISABLED'}`,
+      });
+    }
+
+    return {
+      locationValidationEnabled: enabled,
+      message: `System location validation has been ${enabled ? 'enabled' : 'disabled'}.`,
+    };
   }
 
   // Find all office locations

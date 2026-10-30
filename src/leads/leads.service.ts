@@ -20,6 +20,10 @@ import {
 import { ProcessClaimRequestDto } from './dto/process-claim-request.dto';
 import { QueryClaimRequestDto } from './dto/query-claim-request.dto';
 
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
+import { isPreferredDateInPast } from 'src/common/utils/date.util';
+import * as xlsx from 'xlsx';
+
 // CENTRALIZED SOURCE OF TRUTH FOR LEAD ASSIGNMENT ELIGIBILITY PREDICATE
 export const buildAssignableLeadsWhere = (now: Date = new Date()) => ({
   status: {
@@ -42,7 +46,8 @@ export class LeadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
-  ) {}
+    private readonly teamLeadAuthService: TeamLeadAuthorizationService,
+  ) { }
 
   private async validateAndGetCollegePitches(tx: any, collegeIds: string[]) {
     const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -110,6 +115,412 @@ export class LeadsService {
     return null;
   }
 
+  /**
+   * Dispatches "Lead Posted" notification when a Program Advisor creates a lead.
+   * Recipients:
+   * 1. Team Lead: Team Lead supervising the PA (via TeamLeadAdvisor) or the PA's team (via TeamLead)
+   * 2. Manager: Responsible Manager overseeing the PA or team
+   * 3. Super Admin: All active Super Admins across the entire CRM
+   */
+  async notifyLeadCreatedByPA(
+    tx: any,
+    paUserId: string,
+    lead: any,
+    resolvedTeamId: number | null,
+    counsellingCount = 0,
+  ): Promise<void> {
+    if (!tx?.user) return;
+
+    try {
+      const creator = await tx.user.findUnique({
+        where: { id: paUserId },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          roleId: true,
+          teamId: true,
+          managerId: true,
+          role: { select: { name: true } },
+          team: {
+            select: {
+              id: true,
+              name: true,
+              managerId: true,
+            },
+          },
+        },
+      });
+
+      if (!creator) return;
+
+      const roleName = (creator.role?.name || '')
+        .toUpperCase()
+        .replace(/\s+/g, '_');
+      const isPA =
+        creator.roleId === 2 ||
+        ['PROGRAM_ADVISOR', 'PROGRAMADVISOR', 'PA', 'ADVISOR'].includes(
+          roleName,
+        );
+      const isTL =
+        creator.roleId === 4 ||
+        roleName.includes('LEAD') ||
+        Boolean(
+          tx.teamLead?.findFirst
+            ? await tx.teamLead.findFirst({ where: { userId: paUserId } })
+            : false,
+        );
+      const isManager =
+        creator.roleId === 3 || roleName.includes('MANAGER');
+
+      // If created by Manager or any non-(PA/Team Lead), show success toast only and do not create notifications
+      if (isManager || (!isPA && !isTL)) {
+        return;
+      }
+
+      const effectiveTeamId =
+        resolvedTeamId || creator.teamId || creator.team?.id || null;
+
+      const recipientIds = new Set<string>();
+
+      // 1. Resolve Team Leads (only when a PA creates a lead):
+      if (isPA) {
+        // (a) Directly assigned Team Leads supervising this PA (via TeamLeadAdvisor)
+        const directTls = tx.teamLeadAdvisor
+          ? await tx.teamLeadAdvisor.findMany({
+              where: { advisorId: paUserId },
+              select: { teamLeadId: true },
+            })
+          : [];
+
+        // (b) Team Leads for the PA's team (via TeamLead join table)
+        const teamTls =
+          effectiveTeamId && tx.teamLead
+            ? await tx.teamLead.findMany({
+                where: { teamId: effectiveTeamId },
+                select: { userId: true },
+              })
+            : [];
+
+        for (const tl of directTls) {
+          if (tl.teamLeadId && tl.teamLeadId !== paUserId) {
+            recipientIds.add(tl.teamLeadId);
+          }
+        }
+
+        for (const tl of teamTls) {
+          if (tl.userId && tl.userId !== paUserId) {
+            recipientIds.add(tl.userId);
+          }
+        }
+      }
+
+      // 2. Resolve Authorized Manager:
+      let managerId = await this.findResponsibleManagerId(tx, paUserId);
+      if (!managerId && effectiveTeamId && tx.team?.findUnique) {
+        const team = await tx.team.findUnique({
+          where: { id: effectiveTeamId },
+          select: { managerId: true },
+        });
+        if (team?.managerId) {
+          managerId = team.managerId;
+        }
+      }
+
+      // If creator is Team Lead, also check managers of teams this TL leads
+      if (isTL && !managerId && tx.teamLead?.findMany) {
+        const ledTeams = await tx.teamLead.findMany({
+          where: { userId: paUserId },
+          include: { team: { select: { managerId: true } } },
+        });
+        for (const lt of ledTeams) {
+          if (lt.team?.managerId && lt.team.managerId !== paUserId) {
+            recipientIds.add(lt.team.managerId);
+          }
+        }
+      }
+
+      if (managerId && managerId !== paUserId) {
+        recipientIds.add(managerId);
+      }
+
+      // 3. Resolve Super Admins:
+      const superAdmins = tx.user.findMany
+        ? await tx.user.findMany({
+            where: {
+              status: 'ACTIVE',
+              OR: [
+                { roleId: 1 },
+                {
+                  role: {
+                    name: {
+                      in: ['SUPER_ADMIN', 'SUPERADMIN', 'Super Admin'],
+                    },
+                  },
+                },
+              ],
+            },
+            select: { id: true },
+          })
+        : [];
+
+      for (const sa of superAdmins) {
+        if (sa.id && sa.id !== paUserId) {
+          recipientIds.add(sa.id);
+        }
+      }
+
+      // Ensure creator never receives notification for their own action
+      recipientIds.delete(paUserId);
+
+      const candidateIds = Array.from(recipientIds);
+      if (candidateIds.length === 0) return;
+
+      // Ensure all recipients are currently ACTIVE users
+      const activeRecipients = tx.user.findMany
+        ? await tx.user.findMany({
+            where: {
+              id: { in: candidateIds },
+              status: 'ACTIVE',
+            },
+            select: { id: true },
+          })
+        : candidateIds.map((id) => ({ id }));
+
+      const finalRecipientUserIds = (activeRecipients || []).map(
+        (u: { id: string }) => u.id,
+      );
+      if (finalRecipientUserIds.length === 0) return;
+
+      // 5. Compose notification title & message
+      const roleLabel = isTL ? 'Team Lead' : 'Advisor';
+      const defaultRoleName = isTL ? 'Team Lead' : 'Program Advisor';
+      const paName =
+        [creator.firstName, creator.lastName].filter(Boolean).join(' ') ||
+        defaultRoleName;
+      const studentName =
+        [lead.firstName, lead.lastName].filter(Boolean).join(' ') ||
+        'New Student';
+
+      let teamName = creator.team?.name;
+      if (!teamName && effectiveTeamId && tx.team?.findUnique) {
+        const team = await tx.team.findUnique({
+          where: { id: effectiveTeamId },
+          select: { name: true },
+        });
+        teamName = team?.name;
+      }
+      teamName = teamName || 'Unassigned';
+
+      const now = lead.createdAt ? new Date(lead.createdAt) : new Date();
+      const creationDate =
+        now.toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+        }) +
+        ' ' +
+        now.toLocaleTimeString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        });
+
+      const title = 'New Lead Created';
+      let message = `A new lead has been created by ${paName}.\nStudent: ${studentName}\n${roleLabel}: ${paName}\nTeam: ${teamName}\nCreated: ${creationDate}`;
+      if (counsellingCount > 0) {
+        message += `\nCounselling Requested: ${counsellingCount} College(s)`;
+      }
+      message += `\nLead Details: /leads\nLink: /leads/${lead.id}`;
+
+      await this.notificationsService.createNotification(
+        {
+          title,
+          message,
+          type: 'LEAD',
+          recipientUserIds: finalRecipientUserIds,
+        },
+        tx,
+      );
+    } catch (err) {
+      console.error('Error generating Lead Posted notification:', err);
+    }
+  }
+
+  private async sendCounsellingRequestedNotification(
+    leadId: string,
+    collegeId: string,
+    requestingUserId: string,
+    tx?: any,
+  ) {
+    try {
+      const prisma = tx || this.prisma;
+      const [lead, college, requestingUser] = await Promise.all([
+        prisma.lead.findUnique({
+          where: { id: leadId },
+          select: { id: true, firstName: true, lastName: true },
+        }),
+        prisma.college.findUnique({
+          where: { id: collegeId },
+          select: { id: true, name: true },
+        }),
+        prisma.user.findUnique({
+          where: { id: requestingUserId },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            teamId: true,
+            managerId: true,
+          },
+        }),
+      ]);
+
+      if (!lead || !college || !requestingUser) return;
+
+      const studentName =
+        [lead.firstName, lead.lastName].filter(Boolean).join(' ') || 'Student';
+      const collegeName = college.name || 'College';
+      const paName =
+        [requestingUser.firstName, requestingUser.lastName].filter(Boolean).join(' ') ||
+        'Advisor';
+      const now = new Date();
+      const requestTime =
+        now.toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+        }) +
+        ' ' +
+        now.toLocaleTimeString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        });
+
+      // 1. Resolve Team Leads for requesting user
+      const directTls = prisma.teamLeadAdvisor
+        ? await prisma.teamLeadAdvisor.findMany({
+            where: { advisorId: requestingUserId },
+            select: { teamLeadId: true },
+          })
+        : [];
+      const teamTls =
+        requestingUser.teamId && prisma.teamLead
+          ? await prisma.teamLead.findMany({
+              where: { teamId: requestingUser.teamId },
+              select: { userId: true },
+            })
+          : [];
+
+      // 2. Resolve Manager
+      let managerId: string | null = requestingUser.managerId;
+      if (!managerId && requestingUser.teamId) {
+        const team = await prisma.team.findUnique({
+          where: { id: requestingUser.teamId },
+          select: { managerId: true },
+        });
+        managerId = team?.managerId ?? null;
+      }
+
+      // 3. Resolve Super Admins
+      const superAdmins = await prisma.user.findMany({
+        where: {
+          status: 'ACTIVE',
+          OR: [
+            { roleId: 1 },
+            {
+              role: {
+                name: {
+                  in: ['SUPER_ADMIN', 'SUPERADMIN', 'Super Admin'],
+                },
+              },
+            },
+          ],
+        },
+        select: { id: true },
+      });
+
+      const recipientIds = new Set<string>();
+      for (const tl of directTls) {
+        if (tl.teamLeadId && tl.teamLeadId !== requestingUserId) {
+          recipientIds.add(tl.teamLeadId);
+        }
+      }
+      for (const tl of teamTls) {
+        if (tl.userId && tl.userId !== requestingUserId) {
+          recipientIds.add(tl.userId);
+        }
+      }
+      if (managerId && managerId !== requestingUserId) {
+        recipientIds.add(managerId);
+      }
+      for (const sa of superAdmins) {
+        if (sa.id && sa.id !== requestingUserId) {
+          recipientIds.add(sa.id);
+        }
+      }
+
+      const candidateIds = Array.from(recipientIds);
+      if (candidateIds.length === 0) return;
+
+      const activeRecipients = await prisma.user.findMany({
+        where: {
+          id: { in: candidateIds },
+          status: 'ACTIVE',
+        },
+        select: { id: true },
+      });
+
+      const finalRecipientUserIds = activeRecipients.map((u: any) => u.id);
+      if (finalRecipientUserIds.length === 0) return;
+
+      const title = 'Counselling Requested';
+      const message = `A new counselling request has been created.\nStudent: ${studentName}\nCollege: ${collegeName}\nRequesting PA: ${paName}\nTime: ${requestTime}\nLink: /counselling`;
+
+      await this.notificationsService.createNotification(
+        {
+          title,
+          message,
+          type: 'SYSTEM',
+          recipientUserIds: finalRecipientUserIds,
+        },
+        tx,
+      );
+    } catch (err) {
+      console.error('Error generating Counselling Requested notification:', err);
+    }
+  }
+
+  private async validateCollegeIdsExist(
+    tx: any,
+    collegeIds: string[],
+    fieldName = 'negativeCollegeIds',
+  ) {
+    if (!collegeIds || collegeIds.length === 0) return;
+    const uniqueIds = Array.from(new Set(collegeIds));
+    const foundColleges = await tx.college.findMany({
+      where: {
+        id: {
+          in: uniqueIds,
+        },
+      },
+      select: {
+        id: true,
+      },
+    });
+    const foundSet = new Set(foundColleges.map((c: { id: string }) => c.id));
+    const missingIds = uniqueIds.filter((id) => !foundSet.has(id));
+
+    if (missingIds.length > 0) {
+      throw new BadRequestException({
+        message: 'One or more selected colleges do not exist',
+        field: fieldName,
+        invalidIds: missingIds,
+      });
+    }
+  }
+
   async create(createLeadDto: CreateLeadDto, userId: string) {
     let targetStatusId: number;
     if (createLeadDto.statusId) {
@@ -152,12 +563,64 @@ export class LeadsService {
       );
     }
 
+    const creatorUser = this.prisma.user
+      ? await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { teamId: true },
+      })
+      : null;
+    let resolvedTeamId: number | null = creatorUser?.teamId || null;
+
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(userId);
+    if (isTeamLead) {
+      const assignedTeamIds =
+        await this.teamLeadAuthService.getTeamLeadAssignedTeamIds(userId);
+      if (createLeadDto.teamId) {
+        if (assignedTeamIds.includes(createLeadDto.teamId)) {
+          resolvedTeamId = createLeadDto.teamId;
+        } else {
+          throw new ForbiddenException(
+            'You are not authorized for the requested team.',
+          );
+        }
+      } else if (assignedTeamIds.length > 0) {
+        resolvedTeamId = assignedTeamIds[0];
+      }
+    }
+
     const {
       collegeIds,
+      negativeColleges,
+      counsellingRequests,
       dateOfBirth: rawDob,
       statusId: _,
+      teamId: __,
       ...leadData
     } = createLeadDto;
+
+    if (!collegeIds || !Array.isArray(collegeIds) || collegeIds.length === 0) {
+      throw new BadRequestException('At least one formal application college must be selected.');
+    }
+    if (leadData.source !== 'OTHER') {
+      (leadData as any).sourceOther = null;
+    }
+    if (leadData.courseInterested !== 'OTHER') {
+      (leadData as any).courseInterestedOther = null;
+    }
+    const prefBudget =
+      createLeadDto.preferredBudget !== undefined &&
+      createLeadDto.preferredBudget !== null &&
+      (createLeadDto.preferredBudget as any) !== '' &&
+      !isNaN(Number(createLeadDto.preferredBudget))
+        ? Number(createLeadDto.preferredBudget)
+        : null;
+    if (prefBudget !== null && prefBudget < 0) {
+      throw new BadRequestException('Preferred budget must be non-negative');
+    }
+    (leadData as any).preferredState = leadData.preferredState?.trim() || null;
+    (leadData as any).preferredCity = leadData.preferredCity?.trim() || null;
+    (leadData as any).preferredBudget = prefBudget;
+    (leadData as any).referredBy = leadData.referredBy?.trim() || null;
     const dateOfBirth = rawDob ? new Date(rawDob) : undefined;
     const now = new Date();
     const expiresAt = new Date(now);
@@ -167,23 +630,47 @@ export class LeadsService {
       async (tx) => {
         const lead = existingLead
           ? await tx.lead.update({
-              where: {
-                id: existingLead.id,
-              },
-              data: {
-                ...leadData,
-                ...(dateOfBirth && { dateOfBirth }),
-                statusId: targetStatusId,
-              },
-            })
+            where: {
+              id: existingLead.id,
+            },
+            data: {
+              ...leadData,
+              ...(dateOfBirth && { dateOfBirth }),
+              statusId: targetStatusId,
+              ...(resolvedTeamId && { teamId: resolvedTeamId }),
+            },
+          })
           : await tx.lead.create({
-              data: {
-                ...leadData,
-                ...(dateOfBirth && { dateOfBirth }),
-                statusId: targetStatusId,
-                createdById: userId,
-              },
+            data: {
+              ...leadData,
+              ...(dateOfBirth && { dateOfBirth }),
+              statusId: targetStatusId,
+              createdById: userId,
+              ...(resolvedTeamId && { teamId: resolvedTeamId }),
+            },
+          });
+
+        if (negativeColleges && negativeColleges.length > 0) {
+          const seen = new Set<string>();
+          const uniqueNegativeNames = negativeColleges
+            .map((name) => name.trim())
+            .filter((name) => {
+              if (!name) return false;
+              const lower = name.toLowerCase();
+              if (seen.has(lower)) return false;
+              seen.add(lower);
+              return true;
             });
+          if (uniqueNegativeNames.length > 0) {
+            await tx.leadNegativeCollege.createMany({
+              data: uniqueNegativeNames.map((collegeName) => ({
+                leadId: lead.id,
+                collegeName,
+              })),
+              skipDuplicates: true,
+            });
+          }
+        }
 
         if (collegeIds && collegeIds.length > 0) {
           const uniqueCollegeIds = Array.from(new Set(collegeIds));
@@ -194,13 +681,13 @@ export class LeadsService {
 
           const creatorUser = tx.user
             ? await tx.user.findUnique({
-                where: { id: userId },
-                select: {
-                  firstName: true,
-                  lastName: true,
-                  role: { select: { name: true } },
-                },
-              })
+              where: { id: userId },
+              select: {
+                firstName: true,
+                lastName: true,
+                role: { select: { name: true } },
+              },
+            })
             : null;
 
           const creatorRoleName = creatorUser?.role?.name
@@ -270,6 +757,52 @@ export class LeadsService {
           }
         }
 
+        if (counsellingRequests && counsellingRequests.length > 0) {
+          for (const req of counsellingRequests) {
+            if (req.preferredDate && req.preferredDate.trim()) {
+              if (isPreferredDateInPast(req.preferredDate)) {
+                throw new BadRequestException('Preferred counselling date cannot be in the past');
+              }
+            }
+          }
+          const counsellingCollegeIds = counsellingRequests.map((r) => r.collegeId);
+          await this.validateCollegeIdsExist(tx, counsellingCollegeIds);
+
+          const seenCounselling = new Set<string>();
+          for (const req of counsellingRequests) {
+            if (!seenCounselling.has(req.collegeId)) {
+              seenCounselling.add(req.collegeId);
+              let parsedDate: Date | null = null;
+              if (req.preferredDate && req.preferredDate.trim()) {
+                const dateStr = req.preferredDate.trim();
+                const d = new Date(dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00.000Z`);
+                if (!isNaN(d.getTime())) {
+                  parsedDate = d;
+                }
+              }
+              const prefTime = req.preferredTime?.trim() || null;
+              const legacyTiming =
+                req.preferredTiming?.trim() ||
+                (parsedDate || prefTime
+                  ? [req.preferredDate?.trim(), prefTime].filter(Boolean).join(' ')
+                  : null);
+
+              await tx.collegeCounsellingRequest.create({
+                data: {
+                  leadId: lead.id,
+                  collegeId: req.collegeId,
+                  preferredDate: parsedDate,
+                  preferredTime: prefTime,
+                  preferredTiming: legacyTiming,
+                  purpose: req.purpose?.trim() || null,
+                  status: 'REQUESTED',
+                  requestedById: userId,
+                },
+              });
+            }
+          }
+        }
+
         await tx.activityLog.create({
           data: {
             userId,
@@ -300,6 +833,15 @@ export class LeadsService {
           },
         });
 
+        // Trigger Lead Posted notification when Program Advisor creates a lead
+        await this.notifyLeadCreatedByPA(
+          tx,
+          userId,
+          lead,
+          resolvedTeamId,
+          counsellingRequests?.length || 0,
+        );
+
         const collegeApplications = await tx.leadCollege.findMany({
           where: {
             leadId: lead.id,
@@ -317,15 +859,24 @@ export class LeadsService {
           },
         });
 
+        const savedNegativeColleges = (tx as any).leadNegativeCollege
+          ? await (tx as any).leadNegativeCollege.findMany({
+            where: {
+              leadId: lead.id,
+            },
+          })
+          : [];
+
         return {
           lead: {
             ...lead,
             collegeApplications,
+            negativeColleges: savedNegativeColleges,
           },
           assignment,
         };
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
   }
 
@@ -340,6 +891,8 @@ export class LeadsService {
       toDate?: string;
       page?: string | number;
       limit?: string | number;
+      colleges?: string | string[];
+      ownerId?: string;
     } = {},
     scope: string = 'OWN',
   ) {
@@ -360,13 +913,44 @@ export class LeadsService {
     });
     const managedTeamIds = managedTeams.map((t) => t.id);
 
-    const normalizedRole = roleName.toUpperCase();
+    const normalizedRole = roleName.toUpperCase().replace(/\s+/g, '_');
     const isManagerRole =
       normalizedRole.includes('MANAGER') || managedTeamIds.length > 0;
 
     const managedTeamMemberIds = await this.getManagerTeamMemberIds(user.sub);
 
-    if (normalizedRole.includes('ADMIN') || scope === 'ALL') {
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+    const isAdminRole = normalizedRole.includes('ADMIN');
+    const isProgramAdvisor = [
+      'PROGRAM_ADVISOR',
+      'PROGRAMADVISOR',
+      'PA',
+      'ADVISOR',
+    ].includes(normalizedRole);
+
+    // Enforce strict lead ownership for Program Advisors:
+    if (isProgramAdvisor && !isAdminRole && !isManagerRole && !isTeamLead) {
+      if (query?.ownerId) {
+        const ownerIds = Array.isArray(query.ownerId)
+          ? query.ownerId
+          : String(query.ownerId)
+            .split(',')
+            .map((id) => id.trim())
+            .filter(Boolean);
+
+        const hasUnauthorizedOwner = ownerIds.some(
+          (id) => id.toUpperCase() !== user.sub.toUpperCase(),
+        );
+
+        if (hasUnauthorizedOwner) {
+          throw new ForbiddenException(
+            'Access denied: Program Advisors are only authorized to access their own leads.',
+          );
+        }
+      }
+    }
+
+    if (isAdminRole || scope === 'ALL') {
       baseScopeWhere = {};
     } else if (isManagerRole || scope === 'MANAGED') {
       const allTeamIds = [
@@ -399,6 +983,25 @@ export class LeadsService {
           },
         ],
       };
+    } else if (isTeamLead) {
+      const supervisedAdvisorIds =
+        await this.teamLeadAuthService.getTeamLeadAdvisorIds(user.sub);
+      const authorizedUserIds = Array.from(
+        new Set([user.sub, ...supervisedAdvisorIds]),
+      );
+
+      baseScopeWhere = {
+        OR: [
+          { createdById: { in: authorizedUserIds } },
+          {
+            assignments: {
+              some: {
+                userId: { in: authorizedUserIds },
+              },
+            },
+          },
+        ],
+      };
     } else if (scope === 'TEAM') {
       baseScopeWhere = {
         OR: [
@@ -414,11 +1017,20 @@ export class LeadsService {
       // DEFAULT: 'OWN'
       baseScopeWhere = {
         OR: [
-          { createdById: user.sub },
           {
             assignments: {
               some: {
                 userId: user.sub,
+              },
+            },
+          },
+          {
+            createdById: user.sub,
+            assignments: {
+              none: {
+                userId: { not: user.sub },
+                status: 'ACTIVE',
+                expiresAt: { gt: new Date() },
               },
             },
           },
@@ -463,16 +1075,57 @@ export class LeadsService {
     let searchWhere: any = null;
     if (query?.search && query.search.trim() !== '') {
       const term = query.search.trim();
-      searchWhere = {
-        OR: [
-          { firstName: { contains: term, mode: 'insensitive' } },
-          { lastName: { contains: term, mode: 'insensitive' } },
-          { email: { contains: term, mode: 'insensitive' } },
-          { phone: { contains: term, mode: 'insensitive' } },
-          { courseInterested: { contains: term, mode: 'insensitive' } },
-          { city: { contains: term, mode: 'insensitive' } },
-        ],
-      };
+      const termUpper = term.toUpperCase();
+      const validCourses = ['MBA', 'PGDM', 'MCA', 'BBA', 'OTHER'];
+      const matchedCourses = validCourses.filter((c) => c.includes(termUpper));
+      const words = term.split(/\s+/).filter(Boolean);
+
+      const orConditions: any[] = [
+        { firstName: { contains: term, mode: 'insensitive' } },
+        { lastName: { contains: term, mode: 'insensitive' } },
+        { email: { contains: term, mode: 'insensitive' } },
+        { phone: { contains: term, mode: 'insensitive' } },
+        { alternatePhone: { contains: term, mode: 'insensitive' } },
+        { city: { contains: term, mode: 'insensitive' } },
+        { state: { contains: term, mode: 'insensitive' } },
+        { preferredCity: { contains: term, mode: 'insensitive' } },
+        { preferredState: { contains: term, mode: 'insensitive' } },
+        { courseInterestedOther: { contains: term, mode: 'insensitive' } },
+        { specializationInterested: { contains: term, mode: 'insensitive' } },
+        { graduationCollegeName: { contains: term, mode: 'insensitive' } },
+        {
+          collegeApplications: {
+            some: {
+              college: {
+                name: { contains: term, mode: 'insensitive' },
+              },
+            },
+          },
+        },
+        {
+          finalCollege: {
+            name: { contains: term, mode: 'insensitive' },
+          },
+        },
+      ];
+
+      // Multi-word name matching (e.g. "Abhay Tomar", "Lead Two")
+      if (words.length > 1) {
+        orConditions.push({
+          AND: words.map((w) => ({
+            OR: [
+              { firstName: { contains: w, mode: 'insensitive' } },
+              { lastName: { contains: w, mode: 'insensitive' } },
+            ],
+          })),
+        });
+      }
+
+      if (matchedCourses.length > 0) {
+        orConditions.push({ courseInterested: { in: matchedCourses } });
+      }
+
+      searchWhere = { OR: orConditions };
     }
 
     // Time filter (on Lead.createdAt)
@@ -620,6 +1273,68 @@ export class LeadsService {
       andConditions.push(timeWhere);
     }
 
+    // Colleges filter
+    if (query?.colleges) {
+      const collegeIds = Array.isArray(query.colleges)
+        ? query.colleges
+        : String(query.colleges).split(',').map((id) => id.trim()).filter(Boolean);
+
+      if (collegeIds.length > 0) {
+        andConditions.push({
+          collegeApplications: {
+            some: {
+              collegeId: { in: collegeIds }
+            }
+          }
+        });
+      }
+    }
+
+    // Owner / Claimed By filter
+    if (query?.ownerId) {
+      const ownerIds = Array.isArray(query.ownerId)
+        ? query.ownerId
+        : String(query.ownerId).split(',').map((id) => id.trim()).filter(Boolean);
+
+      if (ownerIds.length > 0) {
+        const hasUnassigned = ownerIds.some(id => id.toUpperCase() === 'UNASSIGNED');
+        const validOwnerIds = ownerIds.filter(id => id.toUpperCase() !== 'UNASSIGNED' && id.toUpperCase() !== 'ALL');
+
+        const ownerConditions: any[] = [];
+
+        if (hasUnassigned) {
+          ownerConditions.push({
+            assignments: {
+              none: {
+                status: 'ACTIVE',
+                expiresAt: { gt: new Date() },
+              },
+            },
+          });
+        }
+
+        if (validOwnerIds.length > 0) {
+          ownerConditions.push({
+            assignments: {
+              some: {
+                userId: { in: validOwnerIds },
+                status: 'ACTIVE',
+                expiresAt: { gt: new Date() },
+              },
+            },
+          });
+        }
+
+        if (ownerConditions.length > 0) {
+          andConditions.push(
+            ownerConditions.length === 1
+              ? ownerConditions[0]
+              : { OR: ownerConditions }
+          );
+        }
+      }
+    }
+
     const finalWhere = andConditions.length > 0 ? { AND: andConditions } : {};
 
     // Pagination
@@ -692,6 +1407,45 @@ export class LeadsService {
               },
             },
           },
+          finalCollege: {
+            select: {
+              id: true,
+              name: true,
+              city: true,
+              state: true,
+            },
+          },
+          negativeColleges: true,
+          acknowledgements: {
+            orderBy: { createdAt: 'desc' },
+            include: {
+              acknowledgedBy: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  role: { select: { id: true, name: true } },
+                  teamsManaged: { select: { id: true } },
+                  teamLeads: { select: { teamId: true } },
+                },
+              },
+              recipient: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                  phone: true,
+                },
+              },
+              sharedBy: {
+                select: {
+                  id: true,
+                  firstName: true,
+                  lastName: true,
+                },
+              },
+            },
+          },
         },
       }),
       this.prisma.lead.count({
@@ -706,6 +1460,66 @@ export class LeadsService {
       limit: hasPagination ? limit : totalCount,
       totalPages: hasPagination ? Math.ceil(totalCount / limit) || 1 : 1,
     };
+  }
+
+  async exportExcel(
+    user: { sub: string; teamId?: number | null },
+    query: {
+      status?: string;
+      statusGroup?: string;
+      search?: string;
+      time?: string;
+      fromDate?: string;
+      toDate?: string;
+      colleges?: string | string[];
+      ownerId?: string;
+    } = {},
+    scope: string = 'OWN',
+  ): Promise<Buffer> {
+    // Reuse findAll, but completely omit page/limit to disable pagination
+    const { data: leads } = await this.findAll(
+      user,
+      { ...query, page: undefined, limit: undefined },
+      scope,
+    );
+
+    // Map lead data into flat structure for Excel
+    const rows = leads.map((lead) => {
+      // Find current owner
+      let ownerName = 'Unassigned';
+      if (lead.assignments && lead.assignments.length > 0) {
+        const activeAssign = lead.assignments[0];
+        if (activeAssign.user) {
+          ownerName = `${activeAssign.user.firstName} ${activeAssign.user.lastName || ''}`.trim();
+        }
+      }
+
+      // Format colleges pitched
+      const pitchedColleges = (lead.collegeApplications || [])
+        .map((app) => app.college?.name)
+        .filter(Boolean)
+        .join(', ');
+
+      return {
+        'Lead Name': `${lead.firstName} ${lead.lastName || ''}`.trim(),
+        'Phone': lead.phone || '',
+        'Email': lead.email || '',
+        'Course': lead.courseInterested || '',
+        'Location': [lead.city, lead.state].filter(Boolean).join(', '),
+        'Colleges Pitched': pitchedColleges,
+        'Current Owner': ownerName,
+        'Status': lead.status?.name || '',
+        'Created Date': lead.createdAt ? new Date(lead.createdAt).toISOString().split('T')[0] : '',
+      };
+    });
+
+    const worksheet = xlsx.utils.json_to_sheet(rows);
+    const workbook = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Leads');
+
+    // Create buffer
+    const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    return buffer;
   }
 
   async update(
@@ -727,6 +1541,13 @@ export class LeadsService {
         id: leadId,
       },
       include: {
+        createdBy: {
+          select: {
+            id: true,
+            teamId: true,
+            managerId: true,
+          },
+        },
         assignments: {
           where: {
             status: 'ACTIVE',
@@ -739,6 +1560,7 @@ export class LeadsService {
               select: {
                 id: true,
                 teamId: true,
+                managerId: true,
               },
             },
           },
@@ -750,7 +1572,77 @@ export class LeadsService {
       throw new NotFoundException('Lead not found');
     }
 
-    if (scope !== 'ALL') {
+    const userRecord = await this.prisma.user.findUnique({
+      where: { id: user.sub },
+      select: { teamId: true, role: { select: { name: true } } },
+    });
+    const roleName = userRecord?.role?.name || '';
+    const normalizedRole = roleName.toUpperCase().replace(/\s+/g, '_');
+    const managedTeams = await this.prisma.team.findMany({
+      where: { managerId: user.sub, isActive: true },
+      select: { id: true },
+    });
+    const managedTeamIds = managedTeams.map((t) => t.id);
+    const isManagerRole =
+      normalizedRole.includes('MANAGER') || managedTeamIds.length > 0;
+    const isAdminRole = normalizedRole.includes('ADMIN');
+    const managedTeamMemberIds = isManagerRole
+      ? await this.getManagerTeamMemberIds(user.sub)
+      : [];
+
+    const activeAssignment = lead.assignments?.[0];
+
+    const isCreator = lead.createdById === user.sub;
+    const isAssigned = activeAssignment?.userId === user.sub;
+    const isSameTeam =
+      scope === 'TEAM' &&
+      user.teamId &&
+      activeAssignment?.user?.teamId === user.teamId;
+
+    const isCreatedByManagedMember = Boolean(
+      lead.createdById &&
+        (managedTeamMemberIds.includes(lead.createdById) ||
+          (lead.createdBy?.teamId && managedTeamIds.includes(lead.createdBy.teamId)) ||
+          lead.createdBy?.managerId === user.sub ||
+          (lead.teamId && managedTeamIds.includes(lead.teamId))),
+    );
+
+    const isAssignedToManagedMember = Boolean(
+      activeAssignment?.userId &&
+        (managedTeamMemberIds.includes(activeAssignment.userId) ||
+          (activeAssignment.user?.teamId &&
+            managedTeamIds.includes(activeAssignment.user.teamId)) ||
+          activeAssignment.user?.managerId === user.sub),
+    );
+
+    const isManagerAccess =
+      isManagerRole &&
+      (isCreatedByManagedMember || isAssignedToManagedMember || isCreator);
+
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+    let isTLAccess = false;
+    if (isTeamLead) {
+      isTLAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+        user.sub,
+        leadId,
+      );
+    }
+
+    if (
+      scope !== 'ALL' &&
+      !isAdminRole &&
+      !isManagerAccess &&
+      !isCreator &&
+      !isAssigned &&
+      !isSameTeam &&
+      !isTLAccess
+    ) {
+      throw new ForbiddenException(
+        'You do not have permission to update this lead.',
+      );
+    }
+
+    if (scope !== 'ALL' && !isAdminRole && !isManagerAccess) {
       const latestAssignment = await this.prisma.leadAssignment.findFirst({
         where: { leadId },
         orderBy: { assignedAt: 'desc' },
@@ -767,22 +1659,39 @@ export class LeadsService {
       }
     }
 
-    const activeAssignment = lead.assignments[0];
-
-    const isCreator = lead.createdById === user.sub;
-    const isAssigned = activeAssignment?.userId === user.sub;
-    const isSameTeam =
-      scope === 'TEAM' &&
-      user.teamId &&
-      activeAssignment?.user?.teamId === user.teamId;
-
-    if (scope !== 'ALL' && !isCreator && !isAssigned && !isSameTeam) {
-      throw new ForbiddenException(
-        'You do not have permission to update this lead.',
-      );
+    const {
+      collegeIds,
+      negativeColleges,
+      counsellingRequests,
+      ...leadData
+    } = updateLeadDto;
+    if (leadData.source && leadData.source !== 'OTHER') {
+      (leadData as any).sourceOther = null;
     }
-
-    const { collegeIds, ...leadData } = updateLeadDto;
+    if (leadData.courseInterested && leadData.courseInterested !== 'OTHER') {
+      (leadData as any).courseInterestedOther = null;
+    }
+    if (leadData.preferredState !== undefined) {
+      leadData.preferredState = leadData.preferredState?.trim() || null;
+    }
+    if (leadData.preferredCity !== undefined) {
+      leadData.preferredCity = leadData.preferredCity?.trim() || null;
+    }
+    if (leadData.referredBy !== undefined) {
+      leadData.referredBy = leadData.referredBy?.trim() || null;
+    }
+    if (leadData.preferredBudget !== undefined) {
+      const budgetVal =
+        leadData.preferredBudget !== null &&
+        (leadData.preferredBudget as any) !== '' &&
+        !isNaN(Number(leadData.preferredBudget))
+          ? Number(leadData.preferredBudget)
+          : null;
+      if (budgetVal !== null && budgetVal < 0) {
+        throw new BadRequestException('Preferred budget must be non-negative');
+      }
+      leadData.preferredBudget = budgetVal;
+    }
 
     return this.prisma.$transaction(
       async (tx) => {
@@ -795,6 +1704,60 @@ export class LeadsService {
             status: true,
           },
         });
+
+        if (negativeColleges !== undefined) {
+          const seen = new Set<string>();
+          const uniqueNegativeNames = negativeColleges
+            .map((name) => name.trim())
+            .filter((name) => {
+              if (!name) return false;
+              const lower = name.toLowerCase();
+              if (seen.has(lower)) return false;
+              seen.add(lower);
+              return true;
+            });
+
+          const existingNegative = await tx.leadNegativeCollege.findMany({
+            where: { leadId },
+            select: { id: true, collegeName: true },
+          });
+
+          const existingNameMap = new Map(
+            existingNegative.map((item) => [item.collegeName.toLowerCase(), item.id]),
+          );
+          const requestedSetLowercase = new Set(uniqueNegativeNames.map((name) => name.toLowerCase()));
+
+          const toRemoveIds: string[] = [];
+          for (const [colNameLower, relId] of existingNameMap.entries()) {
+            if (!requestedSetLowercase.has(colNameLower)) {
+              toRemoveIds.push(relId);
+            }
+          }
+
+          const toAddNames = uniqueNegativeNames.filter(
+            (name) => !existingNameMap.has(name.toLowerCase()),
+          );
+
+          if (toRemoveIds.length > 0) {
+            await tx.leadNegativeCollege.deleteMany({
+              where: {
+                id: {
+                  in: toRemoveIds,
+                },
+              },
+            });
+          }
+
+          if (toAddNames.length > 0) {
+            await tx.leadNegativeCollege.createMany({
+              data: toAddNames.map((collegeName) => ({
+                leadId,
+                collegeName,
+              })),
+              skipDuplicates: true,
+            });
+          }
+        }
 
         if (collegeIds !== undefined) {
           if (collegeIds.length === 0) {
@@ -824,13 +1787,13 @@ export class LeadsService {
 
             const creatorUser = tx.user
               ? await tx.user.findUnique({
-                  where: { id: user.sub },
-                  select: {
-                    firstName: true,
-                    lastName: true,
-                    role: { select: { name: true } },
-                  },
-                })
+                where: { id: user.sub },
+                select: {
+                  firstName: true,
+                  lastName: true,
+                  role: { select: { name: true } },
+                },
+              })
               : null;
 
             const creatorRoleName = creatorUser?.role?.name
@@ -926,12 +1889,171 @@ export class LeadsService {
           },
         });
 
+        if (counsellingRequests !== undefined && tx.collegeCounsellingRequest) {
+          if (counsellingRequests.length > 0) {
+            // Find existing active counselling requests for this lead
+            const existingActiveRequests = await tx.collegeCounsellingRequest.findMany({
+              where: {
+                leadId,
+                status: { in: ['REQUESTED', 'SCHEDULED'] },
+              },
+            });
+
+            const existingActiveCollegeMap = new Map<string, any>(
+              existingActiveRequests.map((r: any) => [r.collegeId, r]),
+            );
+
+            // Deduplicate within incoming payload
+            const seenIncoming = new Set<string>();
+            const deduplicatedIncoming = counsellingRequests.filter((r) => {
+              if (seenIncoming.has(r.collegeId)) return false;
+              seenIncoming.add(r.collegeId);
+              return true;
+            });
+
+            // Identify new requests to create
+            const newRequests = deduplicatedIncoming.filter(
+              (r) => !existingActiveCollegeMap.has(r.collegeId),
+            );
+
+            if (newRequests.length > 0) {
+              for (const req of newRequests) {
+                if (req.preferredDate && req.preferredDate.trim()) {
+                  if (isPreferredDateInPast(req.preferredDate)) {
+                    throw new BadRequestException(
+                      'Preferred counselling date cannot be in the past',
+                    );
+                  }
+                }
+              }
+
+              const newCollegeIds = newRequests.map((r) => r.collegeId);
+              await this.validateCollegeIdsExist(tx, newCollegeIds);
+
+              for (const req of newRequests) {
+                let parsedDate: Date | null = null;
+                if (req.preferredDate && req.preferredDate.trim()) {
+                  const dateStr = req.preferredDate.trim();
+                  const d = new Date(
+                    dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00.000Z`,
+                  );
+                  if (!isNaN(d.getTime())) {
+                    parsedDate = d;
+                  }
+                }
+                const prefTime = req.preferredTime?.trim() || null;
+                const legacyTiming =
+                  req.preferredTiming?.trim() ||
+                  (parsedDate || prefTime
+                    ? [req.preferredDate?.trim(), prefTime]
+                        .filter(Boolean)
+                        .join(' ')
+                    : null);
+
+                await tx.collegeCounsellingRequest.create({
+                  data: {
+                    leadId,
+                    collegeId: req.collegeId,
+                    preferredDate: parsedDate,
+                    preferredTime: prefTime,
+                    preferredTiming: legacyTiming,
+                    purpose: req.purpose?.trim() || null,
+                    status: 'REQUESTED',
+                    requestedById: user.sub,
+                  },
+                });
+
+                await this.sendCounsellingRequestedNotification(
+                  leadId,
+                  req.collegeId,
+                  user.sub,
+                  tx,
+                );
+              }
+            }
+
+            // For existing active requests in REQUESTED status, update details if provided
+            for (const req of deduplicatedIncoming) {
+              const existing = existingActiveCollegeMap.get(req.collegeId);
+              if (existing && existing.status === 'REQUESTED') {
+                let parsedDate: Date | null = existing.preferredDate;
+                if (req.preferredDate !== undefined) {
+                  if (req.preferredDate && req.preferredDate.trim()) {
+                    const dateStr = req.preferredDate.trim();
+                    const d = new Date(
+                      dateStr.includes('T') ? dateStr : `${dateStr}T00:00:00.000Z`,
+                    );
+                    if (!isNaN(d.getTime())) {
+                      parsedDate = d;
+                    }
+                  } else {
+                    parsedDate = null;
+                  }
+                }
+                const prefTime =
+                  req.preferredTime !== undefined
+                    ? req.preferredTime?.trim() || null
+                    : existing.preferredTime;
+                const legacyTiming =
+                  req.preferredTiming?.trim() ||
+                  (parsedDate || prefTime
+                    ? [req.preferredDate?.trim(), prefTime]
+                        .filter(Boolean)
+                        .join(' ')
+                    : null) ||
+                  existing.preferredTiming;
+                const purpose =
+                  req.purpose !== undefined
+                    ? req.purpose?.trim() || null
+                    : existing.purpose;
+
+                await tx.collegeCounsellingRequest.update({
+                  where: { id: existing.id },
+                  data: {
+                    preferredDate: parsedDate,
+                    preferredTime: prefTime,
+                    preferredTiming: legacyTiming,
+                    purpose,
+                  },
+                });
+              }
+            }
+          }
+        }
+
+        const savedNegativeColleges = (tx as any).leadNegativeCollege
+          ? await (tx as any).leadNegativeCollege.findMany({
+            where: { leadId },
+          })
+          : [];
+
+        const savedCounsellingRequests = tx.collegeCounsellingRequest
+          ? await tx.collegeCounsellingRequest.findMany({
+              where: { leadId },
+              include: {
+                college: true,
+                requestedBy: {
+                  select: { id: true, firstName: true, lastName: true },
+                },
+                scheduledBy: {
+                  select: { id: true, firstName: true, lastName: true },
+                },
+                completedBy: {
+                  select: { id: true, firstName: true, lastName: true },
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+            })
+          : [];
+
         return {
           ...updatedLead,
           collegeApplications,
+          negativeColleges: savedNegativeColleges,
+          counsellingRequests: savedCounsellingRequests,
         };
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
   }
 
@@ -995,6 +2117,37 @@ export class LeadsService {
             },
           },
         },
+        negativeColleges: true,
+        acknowledgements: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            acknowledgedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                role: { select: { id: true, name: true } },
+                teamsManaged: { select: { id: true } },
+                teamLeads: { select: { teamId: true } },
+              },
+            },
+            recipient: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                phone: true,
+              },
+            },
+            sharedBy: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+          },
+        },
         tpcs: {
           include: {
             assignments: {
@@ -1028,6 +2181,21 @@ export class LeadsService {
             },
           },
         },
+        counsellingRequests: {
+          include: {
+            college: true,
+            requestedBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+            scheduledBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+            completedBy: {
+              select: { id: true, firstName: true, lastName: true },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        },
       },
     });
 
@@ -1056,8 +2224,21 @@ export class LeadsService {
     const isAdminRole =
       normalizedRole.includes('ADMIN') || normalizedRole === 'HR';
 
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+
     if (isAdminRole || scope === 'ALL') {
       return lead;
+    }
+
+    if (isTeamLead && !isManagerRole) {
+      const hasTLAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+        user.sub,
+        lead.id,
+      );
+      if (hasTLAccess) {
+        return lead;
+      }
+      throw new ForbiddenException('Access denied: You do not have access to this lead.');
     }
 
     const isCreator = lead.createdById === user.sub;
@@ -1107,7 +2288,7 @@ export class LeadsService {
     throw new ForbiddenException('You do not have access to this lead.');
   }
 
-  async searchByPhone(phone: string) {
+  async searchByPhone(phone: string, user?: { sub: string }) {
     const lead = await this.prisma.lead.findFirst({
       where: {
         phone,
@@ -1160,6 +2341,19 @@ export class LeadsService {
       return {
         exists: false,
       };
+    }
+
+    if (user?.sub) {
+      const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+      if (isTeamLead) {
+        const canAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+          user.sub,
+          lead.id,
+        );
+        if (!canAccess) {
+          return { exists: false };
+        }
+      }
     }
 
     return {
@@ -1327,8 +2521,99 @@ export class LeadsService {
           assignment,
         };
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
+  }
+
+  /**
+   * Helper to send persistent notification when a lead is assigned or reallocated.
+   * Format:
+   * Title: "New Lead Assigned" (first time) / "Lead Reallocated to You" (reallocated)
+   * Content includes: Student name, lead ID, assigner name, formatted date & time, link to lead.
+   */
+  async sendLeadAssignmentNotification(params: {
+    recipientUserId: string;
+    leadId: string;
+    studentName: string;
+    assignerName: string;
+    assignedAt: Date;
+    isReallocation: boolean;
+  }): Promise<void> {
+    const {
+      recipientUserId,
+      leadId,
+      studentName,
+      assignerName,
+      assignedAt,
+      isReallocation,
+    } = params;
+
+    const title = isReallocation
+      ? 'Lead Reallocated to You'
+      : 'New Lead Assigned';
+
+    const dateObj = assignedAt ? new Date(assignedAt) : new Date();
+    const formattedDate =
+      dateObj.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      }) +
+      ' ' +
+      dateObj.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      });
+
+    const intro = isReallocation
+      ? `${assignerName} reallocated a lead to you.`
+      : `${assignerName} assigned a new lead to you.`;
+
+    const message = `${intro}\nStudent: ${studentName}\nLead ID: ${leadId}\nAssigned By: ${assignerName}\nAssigned At: ${formattedDate}\nLead Details: /leads/${leadId}\nLink: /leads/${leadId}`;
+
+    await this.notificationsService.createNotification({
+      title,
+      message,
+      type: 'LEAD',
+      recipientUserIds: [recipientUserId],
+    });
+  }
+
+  /**
+   * Helper to send persistent notification when multiple leads are bulk assigned.
+   */
+  async sendBulkLeadAssignmentNotification(params: {
+    recipientUserId: string;
+    count: number;
+    assignerName: string;
+    assignedAt: Date;
+  }): Promise<void> {
+    const { recipientUserId, count, assignerName, assignedAt } = params;
+
+    const dateObj = assignedAt ? new Date(assignedAt) : new Date();
+    const formattedDate =
+      dateObj.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      }) +
+      ' ' +
+      dateObj.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      });
+
+    const title = 'New Lead Assigned';
+    const message = `${assignerName} assigned you ${count} leads for calling.\nStudent: ${count} Leads\nAssigned Leads: ${count} Leads\nAssigned By: ${assignerName}\nAssigned At: ${formattedDate}\nLead Details: /leads\nLink: /leads`;
+
+    await this.notificationsService.createNotification({
+      title,
+      message,
+      type: 'LEAD',
+      recipientUserIds: [recipientUserId],
+    });
   }
 
   async assignLead(
@@ -1338,16 +2623,74 @@ export class LeadsService {
   ) {
     const now = new Date();
 
+    const callerRecord = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: {
+        id: true,
+        roleId: true,
+        role: { select: { id: true, name: true } },
+      },
+    });
+    const callerRole = (callerRecord?.role?.name || '').toUpperCase().replace(/[\s-]/g, '_');
+    const isSuperAdmin =
+      ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(callerRole) ||
+      callerRecord?.roleId === 1 ||
+      callerRecord?.role?.id === 1;
+    const isSuperOrHr = isSuperAdmin || callerRole === 'HR' || callerRecord?.roleId === 4;
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+
+    if (!isSuperAdmin) {
+      if (isTeamLead) {
+        const canAccessLead = await this.teamLeadAuthService.canTeamLeadAccessLead(
+          managerUser.sub,
+          leadId,
+        );
+        if (!canAccessLead) {
+          throw new ForbiddenException(
+            'Access denied: You are not authorized to assign this lead.',
+          );
+        }
+
+        if (targetUserId !== managerUser.sub) {
+          const isSupervisedPA =
+            await this.teamLeadAuthService.canTeamLeadAccessAdvisor(
+              managerUser.sub,
+              targetUserId,
+            );
+          if (!isSupervisedPA) {
+            throw new ForbiddenException(
+              'Team Leads can only assign leads to Program Advisors explicitly supervised by them in the same team.',
+            );
+          }
+        }
+      }
+    }
+
     const targetUser = await this.prisma.user.findUnique({
       where: { id: targetUserId },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        roleId: true,
+        role: { select: { id: true, name: true } },
+      },
     });
 
     if (!targetUser || targetUser.status !== 'ACTIVE') {
       throw new NotFoundException('Target user not found or is inactive.');
     }
 
-    return this.prisma.$transaction(
+    if (targetUser.role || targetUser.roleId) {
+      const targetRoleName = (targetUser.role?.name || '').toUpperCase().replace(/[\s-]/g, '_');
+      const isTargetAllowed =
+        ['PROGRAM_ADVISOR', 'MANAGER', 'TEAM_LEAD', 'SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(targetRoleName) ||
+        [1, 2, 3, 5].includes(targetUser.roleId || targetUser.role?.id);
+      if (!isTargetAllowed || targetRoleName === 'HR' || targetUser.roleId === 4 || targetUser.role?.id === 4) {
+        throw new BadRequestException('Target user role is not eligible to receive lead assignments.');
+      }
+    }
+
+    const txResult = await this.prisma.$transaction(
       async (tx) => {
         // Concurrency protection: lock lead row
         await tx.$queryRaw`SELECT id FROM "Lead" WHERE id = ${leadId}::uuid FOR UPDATE`;
@@ -1368,7 +2711,7 @@ export class LeadsService {
 
         const eligibility = this.evaluateLeadEligibility(lead, now);
 
-        if (!eligibility.isEligible) {
+        if (!isSuperAdmin && !eligibility.isEligible) {
           if (eligibility.errorCode === 'PERMANENT') {
             throw new ForbiddenException(
               'Leads with completed admission cannot be assigned or reassigned.',
@@ -1388,13 +2731,16 @@ export class LeadsService {
           }
         }
 
+        const isReallocation = Boolean(
+          lead.assignments && lead.assignments.length > 0,
+        );
         const previousOwnerId = lead.assignments[0]?.userId || lead.createdById;
 
+        // Ensure previous active assignments are marked EXPIRED so only the new assignment is active
         await tx.leadAssignment.updateMany({
           where: {
             leadId,
             status: 'ACTIVE',
-            expiresAt: { lte: now },
           },
           data: {
             status: 'EXPIRED',
@@ -1429,7 +2775,9 @@ export class LeadsService {
             activity: 'LEAD',
             entityType: 'LEAD',
             entityId: leadId,
-            description: `Lead manually assigned to user ${targetUserId}`,
+            description: isSuperAdmin
+              ? `Lead reallocated by Super Admin to user ${targetUserId}`
+              : `Lead manually assigned to user ${targetUserId}`,
           },
         });
 
@@ -1439,29 +2787,83 @@ export class LeadsService {
         });
         const assignerName = assigner
           ? [assigner.firstName, assigner.lastName].filter(Boolean).join(' ')
-          : 'Manager';
-        const leadName = [lead.firstName, lead.lastName]
-          .filter(Boolean)
-          .join(' ');
-
-        await this.notificationsService.createNotification(
-          {
-            title: 'New Lead Assigned',
-            message: `${assignerName} assigned you a lead for calling: ${leadName}.`,
-            type: 'LEAD',
-            recipientUserIds: [targetUserId],
-          },
-          tx,
-        );
+          : isSuperAdmin
+            ? 'Super Admin'
+            : 'Manager';
+        const studentName =
+          [lead.firstName, lead.lastName].filter(Boolean).join(' ') ||
+          'Student';
 
         return {
-          message: 'Lead assigned successfully',
           leadId,
           assignment,
+          lead,
+          isReallocation,
+          assignerName,
+          studentName,
         };
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
+
+    // Reliable post-commit notification pattern:
+    // Determine the recipient strictly from the persisted assignment record.
+    try {
+      await this.sendLeadAssignmentNotification({
+        recipientUserId: txResult.assignment.userId,
+        leadId: txResult.leadId,
+        studentName: txResult.studentName,
+        assignerName: txResult.assignerName,
+        assignedAt: txResult.assignment.assignedAt,
+        isReallocation: txResult.isReallocation,
+      });
+    } catch (notifErr) {
+      console.error(
+        `Failed to send assignment notification for lead ${leadId} to user ${txResult.assignment.userId}:`,
+        notifErr,
+      );
+    }
+
+    return {
+      message: 'Lead assigned successfully',
+      leadId: txResult.leadId,
+      assignment: txResult.assignment,
+    };
+  }
+
+  async bulkReallocateLeads(
+    dto: { leadIds: string[]; targetUserId: string },
+    managerUser: { sub: string; teamId?: number | null },
+  ) {
+    const { leadIds, targetUserId } = dto;
+    const results: {
+      success: string[];
+      failed: { leadId: string; reason: string }[];
+    } = {
+      success: [],
+      failed: [],
+    };
+
+    for (const leadId of leadIds) {
+      try {
+        await this.assignLead(leadId, targetUserId, managerUser);
+        results.success.push(leadId);
+      } catch (err: any) {
+        results.failed.push({
+          leadId,
+          reason: err.message || 'Failed to reallocate lead',
+        });
+      }
+    }
+
+    return {
+      message: `Reallocated ${results.success.length} of ${leadIds.length} leads successfully`,
+      totalRequested: leadIds.length,
+      successCount: results.success.length,
+      failedCount: results.failed.length,
+      successLeadIds: results.success,
+      failedLeads: results.failed,
+    };
   }
 
   async assignBulkLeads(
@@ -1470,6 +2872,29 @@ export class LeadsService {
   ) {
     const { quantity, targetUserId, teamId } = dto;
     const now = new Date();
+
+    const callerRecord = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const callerRole = (callerRecord?.role?.name || '').toUpperCase();
+    const isSuperOrHr = ['SUPER_ADMIN', 'HR', 'SUPERADMIN', 'ADMIN'].includes(callerRole);
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+
+    if (isTeamLead && !isSuperOrHr) {
+      if (targetUserId !== managerUser.sub) {
+        const isSupervisedPA =
+          await this.teamLeadAuthService.canTeamLeadAccessAdvisor(
+            managerUser.sub,
+            targetUserId,
+          );
+        if (!isSupervisedPA) {
+          throw new ForbiddenException(
+            'Team Leads can only assign bulk leads to Program Advisors explicitly supervised by them in the same team.',
+          );
+        }
+      }
+    }
 
     const targetUser = await this.prisma.user.findUnique({
       where: { id: targetUserId },
@@ -1480,7 +2905,7 @@ export class LeadsService {
       throw new NotFoundException('Target user not found or is inactive.');
     }
 
-    return this.prisma.$transaction(
+    const txResult = await this.prisma.$transaction(
       async (tx) => {
         const assignableWhere: any = buildAssignableLeadsWhere(now);
 
@@ -1536,7 +2961,7 @@ export class LeadsService {
         const combinedPool = [...priority1Expired, ...priority2NeverAssigned];
         const selectedLeads = combinedPool.slice(0, quantity);
 
-        const assignedResults: any[] = [];
+        const assignedResults: { assignment: any; lead: any }[] = [];
         const expiresAt = new Date(now.getTime() + 4 * 24 * 60 * 60 * 1000);
 
         for (const lead of selectedLeads) {
@@ -1589,7 +3014,7 @@ export class LeadsService {
             },
           });
 
-          assignedResults.push(newAssignment);
+          assignedResults.push({ assignment: newAssignment, lead });
         }
 
         await tx.activityLog.create({
@@ -1602,35 +3027,60 @@ export class LeadsService {
           },
         });
 
-        if (assignedResults.length > 0) {
-          const assigner = await tx.user.findUnique({
-            where: { id: managerUser.sub },
-            select: { firstName: true, lastName: true },
-          });
-          const assignerName = assigner
-            ? [assigner.firstName, assigner.lastName].filter(Boolean).join(' ')
-            : 'Manager';
-
-          await this.notificationsService.createNotification(
-            {
-              title: 'New Lead Assigned',
-              message: `${assignerName} assigned you ${assignedResults.length} lead(s) for calling.`,
-              type: 'LEAD',
-              recipientUserIds: [targetUserId],
-            },
-            tx,
-          );
-        }
+        const assigner = await tx.user.findUnique({
+          where: { id: managerUser.sub },
+          select: { firstName: true, lastName: true },
+        });
+        const assignerName = assigner
+          ? [assigner.firstName, assigner.lastName].filter(Boolean).join(' ')
+          : 'Manager';
 
         return {
-          message: `Successfully assigned ${assignedResults.length} lead(s)`,
-          requestedQuantity: quantity,
-          assignedCount: assignedResults.length,
-          assignments: assignedResults,
+          assignedResults,
+          assignerName,
         };
       },
-      { timeout: 30000 },
+      { maxWait: 15000, timeout: 60000 },
     );
+
+    if (txResult.assignedResults.length > 0) {
+      try {
+        if (txResult.assignedResults.length === 1) {
+          const single = txResult.assignedResults[0];
+          const studentName =
+            [single.lead.firstName, single.lead.lastName]
+              .filter(Boolean)
+              .join(' ') || 'Student';
+          await this.sendLeadAssignmentNotification({
+            recipientUserId: single.assignment.userId,
+            leadId: single.lead.id,
+            studentName,
+            assignerName: txResult.assignerName,
+            assignedAt: single.assignment.assignedAt,
+            isReallocation: false,
+          });
+        } else {
+          await this.sendBulkLeadAssignmentNotification({
+            recipientUserId: targetUserId,
+            count: txResult.assignedResults.length,
+            assignerName: txResult.assignerName,
+            assignedAt: now,
+          });
+        }
+      } catch (err) {
+        console.error(
+          `[LeadsService] Failed to send bulk assignment notification to user ${targetUserId}:`,
+          err,
+        );
+      }
+    }
+
+    return {
+      message: `Successfully assigned ${txResult.assignedResults.length} lead(s)`,
+      requestedQuantity: quantity,
+      assignedCount: txResult.assignedResults.length,
+      assignments: txResult.assignedResults.map((r) => r.assignment),
+    };
   }
 
   async getAssignableLeadsCount(user: { sub: string; teamId?: number | null }) {
@@ -1683,9 +3133,22 @@ export class LeadsService {
       whereClause.approvalStatus = statusFilter;
     }
 
-    if (scope === 'TEAM') {
-      const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
-      whereClause.pitchedById = { in: memberIds };
+    const callerUser = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = (callerUser?.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+
+    if (!isSuperAdmin) {
+      const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+      if (isTeamLead) {
+        const supervisedAdvisorIds = await this.teamLeadAuthService.getTeamLeadAdvisorIds(managerUser.sub);
+        whereClause.pitchedById = { in: Array.from(new Set([managerUser.sub, ...supervisedAdvisorIds])) };
+      } else if (scope === 'TEAM') {
+        const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
+        whereClause.pitchedById = { in: memberIds };
+      }
     }
 
     return this.prisma.leadCollege.findMany({
@@ -1769,12 +3232,30 @@ export class LeadsService {
       return pitch;
     }
 
-    if (scope === 'TEAM') {
-      const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
-      if (!memberIds.includes(pitch.pitchedById)) {
-        throw new ForbiddenException(
-          'You can only process pitch requests for your team members.',
-        );
+    const callerUser = await this.prisma.user.findUnique({
+      where: { id: managerUser.sub },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = (callerUser?.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+
+    if (!isSuperAdmin) {
+      const isTeamLead = await this.teamLeadAuthService.isTeamLead(managerUser.sub);
+      if (isTeamLead) {
+        const supervisedAdvisorIds = await this.teamLeadAuthService.getTeamLeadAdvisorIds(managerUser.sub);
+        const authorizedUserIds = Array.from(new Set([managerUser.sub, ...supervisedAdvisorIds]));
+        if (!authorizedUserIds.includes(pitch.pitchedById)) {
+          throw new ForbiddenException(
+            'You can only process college approval requests for yourself or your supervised Program Advisors.',
+          );
+        }
+      } else if (scope === 'TEAM') {
+        const memberIds = await this.getManagerTeamMemberIds(managerUser.sub);
+        if (!memberIds.includes(pitch.pitchedById)) {
+          throw new ForbiddenException(
+            'You can only process pitch requests for your team members.',
+          );
+        }
       }
     }
 
@@ -1831,8 +3312,34 @@ export class LeadsService {
 
         return updatedPitch;
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
+  }
+
+  /**
+   * Resolve the exact LeadCollege record to target.
+   * Prefers explicit `leadCollegeId` (exact match) over `collegeId` (lookup).
+   * Returns the LeadCollege with its `college` and `status` relations included,
+   * or null if no match is found.
+   */
+  private async resolveLeadCollege(
+    tx: any,
+    leadId: string,
+    dto: { leadCollegeId?: string; collegeId?: string },
+  ) {
+    if (dto.leadCollegeId) {
+      return tx.leadCollege.findFirst({
+        where: { id: dto.leadCollegeId, leadId },
+        include: { college: true, status: true },
+      });
+    }
+    if (dto.collegeId) {
+      return tx.leadCollege.findFirst({
+        where: { leadId, collegeId: dto.collegeId },
+        include: { college: true, status: true },
+      });
+    }
+    return null;
   }
 
   async updatePipeline(
@@ -1857,6 +3364,13 @@ export class LeadsService {
           where: { id: leadId },
           include: {
             status: true,
+            createdBy: {
+              select: {
+                id: true,
+                teamId: true,
+                managerId: true,
+              },
+            },
             assignments: {
               where: {
                 status: 'ACTIVE',
@@ -1869,6 +3383,7 @@ export class LeadsService {
                     firstName: true,
                     lastName: true,
                     teamId: true,
+                    managerId: true,
                   },
                 },
               },
@@ -1886,8 +3401,30 @@ export class LeadsService {
           throw new NotFoundException('Lead not found');
         }
 
+        // Fetch user role info for forward-only check, access scope, and approval exemptions
+        const userRecord = await tx.user.findUnique({
+          where: { id: user.sub },
+          include: { role: true },
+        });
+        const roleName = userRecord?.role?.name || '';
+        const userRoleName = roleName.toUpperCase();
+        const normalizedRole = userRoleName.replace(/\s+/g, '_');
+
+        const managedTeams = await tx.team.findMany({
+          where: { managerId: user.sub, isActive: true },
+          select: { id: true },
+        });
+        const managedTeamIds = managedTeams.map((t: any) => t.id);
+        const isManagerRole =
+          normalizedRole.includes('MANAGER') || managedTeamIds.length > 0;
+        const isAdminRole =
+          normalizedRole.includes('ADMIN') || normalizedRole === 'HR';
+        const managedTeamMemberIds = isManagerRole
+          ? await this.getManagerTeamMemberIds(user.sub, tx)
+          : [];
+
         // Check access scope
-        const activeAssignment = lead.assignments[0];
+        const activeAssignment = lead.assignments?.[0];
         const isCreator = lead.createdById === user.sub;
         const isAssigned = activeAssignment?.userId === user.sub;
         const isSameTeam =
@@ -1895,7 +3432,44 @@ export class LeadsService {
           user.teamId &&
           activeAssignment?.user?.teamId === user.teamId;
 
-        if (scope !== 'ALL' && !isCreator && !isAssigned && !isSameTeam) {
+        const isCreatedByManagedMember = Boolean(
+          lead.createdById &&
+            (managedTeamMemberIds.includes(lead.createdById) ||
+              (lead.createdBy?.teamId && managedTeamIds.includes(lead.createdBy.teamId)) ||
+              lead.createdBy?.managerId === user.sub ||
+              (lead.teamId && managedTeamIds.includes(lead.teamId))),
+        );
+
+        const isAssignedToManagedMember = Boolean(
+          activeAssignment?.userId &&
+            (managedTeamMemberIds.includes(activeAssignment.userId) ||
+              (activeAssignment.user?.teamId &&
+                managedTeamIds.includes(activeAssignment.user.teamId)) ||
+              activeAssignment.user?.managerId === user.sub),
+        );
+
+        const isManagerAccess =
+          isManagerRole &&
+          (isCreatedByManagedMember || isAssignedToManagedMember || isCreator);
+
+        const isTeamLead = await this.teamLeadAuthService.isTeamLead(user.sub);
+        let isTLAccess = false;
+        if (isTeamLead) {
+          isTLAccess = await this.teamLeadAuthService.canTeamLeadAccessLead(
+            user.sub,
+            leadId,
+          );
+        }
+
+        if (
+          scope !== 'ALL' &&
+          !isAdminRole &&
+          !isManagerAccess &&
+          !isCreator &&
+          !isAssigned &&
+          !isSameTeam &&
+          !isTLAccess
+        ) {
           throw new ForbiddenException(
             'You do not have permission to update pipeline status for this lead.',
           );
@@ -1912,14 +3486,6 @@ export class LeadsService {
           );
         }
 
-        // Fetch user role info for forward-only check and approval exemptions
-        const userRecord = await tx.user.findUnique({
-          where: { id: user.sub },
-          include: { role: true },
-        });
-        const userRoleName = userRecord?.role?.name
-          ? userRecord.role.name.toUpperCase()
-          : '';
         const isExemptRole = [
           'MANAGER',
           'SUPER_ADMIN',
@@ -1937,8 +3503,8 @@ export class LeadsService {
             : null);
         const existingLeadCollege = targetCollegeId
           ? lead.collegeApplications.find(
-              (app) => app.collegeId === targetCollegeId,
-            ) || null
+            (app) => app.collegeId === targetCollegeId,
+          ) || null
           : null;
 
         if (existingLeadCollege) {
@@ -2084,10 +3650,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2136,10 +3699,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2201,10 +3761,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2243,10 +3800,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2256,6 +3810,20 @@ export class LeadsService {
 
           this.validatePitchApproval(relevantLeadCollege);
 
+          const currentYear = new Date().getFullYear();
+          let paymentDateObj = new Date();
+          if (dto.admission.paidAt) {
+            paymentDateObj = new Date(dto.admission.paidAt);
+            if (isNaN(paymentDateObj.getTime())) {
+              throw new BadRequestException('Invalid payment date format.');
+            }
+            if (paymentDateObj.getFullYear() !== currentYear) {
+              throw new BadRequestException(
+                `Payment date must be within the current year (${currentYear}).`,
+              );
+            }
+          }
+
           await tx.leadCollegePayment.create({
             data: {
               leadCollegeId: relevantLeadCollege.id,
@@ -2263,9 +3831,7 @@ export class LeadsService {
               amount: dto.admission.amount,
               paymentMode: dto.admission.paymentMode || 'ONLINE',
               transactionRef: dto.admission.transactionRef || null,
-              paidAt: dto.admission.paidAt
-                ? new Date(dto.admission.paidAt)
-                : new Date(),
+              paidAt: paymentDateObj,
               processedById: user.sub,
             },
           });
@@ -2292,10 +3858,7 @@ export class LeadsService {
             );
           }
 
-          relevantLeadCollege = await tx.leadCollege.findFirst({
-            where: { leadId, collegeId: dto.collegeId },
-            include: { college: true },
-          });
+          relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
           if (!relevantLeadCollege) {
             throw new NotFoundException(
@@ -2318,11 +3881,8 @@ export class LeadsService {
           activityDescription = `Application cancelled for ${relevantLeadCollege.college.name}. Reason: ${dto.cancellation.reason}`;
         } else {
           // LEAD or generic global status update
-          if (dto.collegeId) {
-            relevantLeadCollege = await tx.leadCollege.findFirst({
-              where: { leadId, collegeId: dto.collegeId },
-              include: { college: true },
-            });
+          if (dto.collegeId || dto.leadCollegeId) {
+            relevantLeadCollege = await this.resolveLeadCollege(tx, leadId, dto);
 
             if (relevantLeadCollege) {
               this.validatePitchApproval(relevantLeadCollege);
@@ -2334,8 +3894,11 @@ export class LeadsService {
           }
         }
 
-        // Update Lead.statusId globally (if not already updated by ADMISSION_DONE)
-        if (statusName !== 'ADMISSION_DONE') {
+        // Update Lead.statusId globally ONLY when:
+        // - ADMISSION_DONE already handled above (Lead.statusId + finalCollegeId)
+        // - College-specific transitions (relevantLeadCollege set) do NOT touch Lead.statusId
+        // - Non-college transitions (relevantLeadCollege null) update Lead.statusId normally
+        if (statusName !== 'ADMISSION_DONE' && !relevantLeadCollege) {
           await tx.lead.update({
             where: { id: leadId },
             data: { statusId: targetStatus.id },
@@ -2343,11 +3906,12 @@ export class LeadsService {
         }
 
         // Create LeadCollegeHistory audit record
+        // Use the LeadCollege's own previous statusId (not Lead.statusId)
         if (relevantLeadCollege) {
           await tx.leadCollegeHistory.create({
             data: {
               leadCollegeId: relevantLeadCollege.id,
-              fromStatusId: lead.statusId,
+              fromStatusId: relevantLeadCollege.statusId ?? lead.statusId,
               toStatusId: targetStatus.id,
               changedById: user.sub,
               remarks:
@@ -2388,7 +3952,7 @@ export class LeadsService {
           },
         });
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
   }
 
@@ -2567,6 +4131,7 @@ export class LeadsService {
           },
           orderBy: { createdAt: 'desc' },
         },
+        negativeColleges: true,
       },
     });
 
@@ -2635,25 +4200,25 @@ export class LeadsService {
           uploadedAt: studentData.upload?.uploadedAt || studentData.createdAt,
           uploadedBy: studentData.upload?.uploadedBy
             ? {
-                id: studentData.upload.uploadedBy.id,
-                name: `${studentData.upload.uploadedBy.firstName} ${studentData.upload.uploadedBy.lastName || ''}`.trim(),
-                role: studentData.upload.uploadedBy.role?.name || 'User',
-              }
+              id: studentData.upload.uploadedBy.id,
+              name: `${studentData.upload.uploadedBy.firstName} ${studentData.upload.uploadedBy.lastName || ''}`.trim(),
+              role: studentData.upload.uploadedBy.role?.name || 'User',
+            }
             : null,
           assignedAt: latestAssignment?.assignedAt || null,
           assignedBy: latestAssignment?.assignedBy
             ? {
-                id: latestAssignment.assignedBy.id,
-                name: `${latestAssignment.assignedBy.firstName} ${latestAssignment.assignedBy.lastName || ''}`.trim(),
-                role: latestAssignment.assignedBy.role?.name || 'User',
-              }
+              id: latestAssignment.assignedBy.id,
+              name: `${latestAssignment.assignedBy.firstName} ${latestAssignment.assignedBy.lastName || ''}`.trim(),
+              role: latestAssignment.assignedBy.role?.name || 'User',
+            }
             : null,
           assignedTo: latestAssignment?.assignedTo
             ? {
-                id: latestAssignment.assignedTo.id,
-                name: `${latestAssignment.assignedTo.firstName} ${latestAssignment.assignedTo.lastName || ''}`.trim(),
-                role: latestAssignment.assignedTo.role?.name || 'User',
-              }
+              id: latestAssignment.assignedTo.id,
+              name: `${latestAssignment.assignedTo.firstName} ${latestAssignment.assignedTo.lastName || ''}`.trim(),
+              role: latestAssignment.assignedTo.role?.name || 'User',
+            }
             : null,
         };
       }
@@ -2670,15 +4235,15 @@ export class LeadsService {
           { entityType: 'Lead', entityId: leadId },
           ...(collegeAppIds.length > 0
             ? [
-                { entityType: 'LEAD_COLLEGE', entityId: { in: collegeAppIds } },
-                { entityType: 'LeadCollege', entityId: { in: collegeAppIds } },
-              ]
+              { entityType: 'LEAD_COLLEGE', entityId: { in: collegeAppIds } },
+              { entityType: 'LeadCollege', entityId: { in: collegeAppIds } },
+            ]
             : []),
           ...(tpcIds.length > 0
             ? [
-                { entityType: 'TPC', entityId: { in: tpcIds } },
-                { entityType: 'Tpc', entityId: { in: tpcIds } },
-              ]
+              { entityType: 'TPC', entityId: { in: tpcIds } },
+              { entityType: 'Tpc', entityId: { in: tpcIds } },
+            ]
             : []),
         ],
       },
@@ -2741,10 +4306,10 @@ export class LeadsService {
 
       const pitchedByInfo = app.pitchedBy
         ? {
-            id: app.pitchedBy.id,
-            name: `${app.pitchedBy.firstName} ${app.pitchedBy.lastName || ''}`.trim(),
-            role: app.pitchedBy.role?.name || 'User',
-          }
+          id: app.pitchedBy.id,
+          name: `${app.pitchedBy.firstName} ${app.pitchedBy.lastName || ''}`.trim(),
+          role: app.pitchedBy.role?.name || 'User',
+        }
         : null;
 
       // Application info
@@ -2758,10 +4323,10 @@ export class LeadsService {
         pitchedBy: pitchedByInfo,
         processedBy: app.processedBy
           ? {
-              id: app.processedBy.id,
-              name: `${app.processedBy.firstName} ${app.processedBy.lastName || ''}`.trim(),
-              role: app.processedBy.role?.name || 'User',
-            }
+            id: app.processedBy.id,
+            name: `${app.processedBy.firstName} ${app.processedBy.lastName || ''}`.trim(),
+            role: app.processedBy.role?.name || 'User',
+          }
           : null,
       };
 
@@ -2779,18 +4344,18 @@ export class LeadsService {
       // Selection Letters
       const selection = app.selectionLetters[0]
         ? {
-            id: app.selectionLetters[0].id,
-            letterUrl: app.selectionLetters[0].letterUrl,
-            issuedAt: app.selectionLetters[0].issuedAt,
-            admissionLastDate: app.selectionLetters[0].admissionLastDate,
-            issuedBy: app.selectionLetters[0].issuedBy
-              ? {
-                  id: app.selectionLetters[0].issuedBy.id,
-                  name: `${app.selectionLetters[0].issuedBy.firstName} ${app.selectionLetters[0].issuedBy.lastName || ''}`.trim(),
-                  role: app.selectionLetters[0].issuedBy.role?.name || 'User',
-                }
-              : null,
-          }
+          id: app.selectionLetters[0].id,
+          letterUrl: app.selectionLetters[0].letterUrl,
+          issuedAt: app.selectionLetters[0].issuedAt,
+          admissionLastDate: app.selectionLetters[0].admissionLastDate,
+          issuedBy: app.selectionLetters[0].issuedBy
+            ? {
+              id: app.selectionLetters[0].issuedBy.id,
+              name: `${app.selectionLetters[0].issuedBy.firstName} ${app.selectionLetters[0].issuedBy.lastName || ''}`.trim(),
+              role: app.selectionLetters[0].issuedBy.role?.name || 'User',
+            }
+            : null,
+        }
         : null;
 
       // Payments
@@ -2805,10 +4370,10 @@ export class LeadsService {
         refundStatus: p.refundStatus,
         processedBy: p.processedBy
           ? {
-              id: p.processedBy.id,
-              name: `${p.processedBy.firstName} ${p.processedBy.lastName || ''}`.trim(),
-              role: p.processedBy.role?.name || 'User',
-            }
+            id: p.processedBy.id,
+            name: `${p.processedBy.firstName} ${p.processedBy.lastName || ''}`.trim(),
+            role: p.processedBy.role?.name || 'User',
+          }
           : null,
       }));
 
@@ -2821,10 +4386,10 @@ export class LeadsService {
         changedAt: h.createdAt,
         changedBy: h.changedBy
           ? {
-              id: h.changedBy.id,
-              name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
-              role: h.changedBy.role?.name || 'User',
-            }
+            id: h.changedBy.id,
+            name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
+            role: h.changedBy.role?.name || 'User',
+          }
           : null,
       }));
 
@@ -2865,24 +4430,24 @@ export class LeadsService {
           completedAt: assign.completedAt,
           assignedBy: assign.assignedBy
             ? {
-                id: assign.assignedBy.id,
-                name: `${assign.assignedBy.firstName} ${assign.assignedBy.lastName || ''}`.trim(),
-                role: assign.assignedBy.role?.name || 'User',
-              }
+              id: assign.assignedBy.id,
+              name: `${assign.assignedBy.firstName} ${assign.assignedBy.lastName || ''}`.trim(),
+              role: assign.assignedBy.role?.name || 'User',
+            }
             : null,
           assignedTo: assign.assignedTo
             ? {
-                id: assign.assignedTo.id,
-                name: `${assign.assignedTo.firstName} ${assign.assignedTo.lastName || ''}`.trim(),
-                role: assign.assignedTo.role?.name || 'User',
-              }
+              id: assign.assignedTo.id,
+              name: `${assign.assignedTo.firstName} ${assign.assignedTo.lastName || ''}`.trim(),
+              role: assign.assignedTo.role?.name || 'User',
+            }
             : null,
           completedBy: assign.completedBy
             ? {
-                id: assign.completedBy.id,
-                name: `${assign.completedBy.firstName} ${assign.completedBy.lastName || ''}`.trim(),
-                role: assign.completedBy.role?.name || 'User',
-              }
+              id: assign.completedBy.id,
+              name: `${assign.completedBy.firstName} ${assign.completedBy.lastName || ''}`.trim(),
+              role: assign.completedBy.role?.name || 'User',
+            }
             : null,
         });
       }
@@ -3014,10 +4579,10 @@ export class LeadsService {
       timestamp: lead.createdAt,
       actor: lead.createdBy
         ? {
-            id: lead.createdBy.id,
-            name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
-            role: lead.createdBy.role?.name || 'User',
-          }
+          id: lead.createdBy.id,
+          name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
+          role: lead.createdBy.role?.name || 'User',
+        }
         : null,
       metadata: { source: lead.source },
     });
@@ -3077,10 +4642,10 @@ export class LeadsService {
         timestamp: it.createdAt,
         actor: it.createdBy
           ? {
-              id: it.createdBy.id,
-              name: `${it.createdBy.firstName} ${it.createdBy.lastName || ''}`.trim(),
-              role: it.createdBy.role?.name || 'User',
-            }
+            id: it.createdBy.id,
+            name: `${it.createdBy.firstName} ${it.createdBy.lastName || ''}`.trim(),
+            role: it.createdBy.role?.name || 'User',
+          }
           : null,
         metadata: { attachmentsCount: it.attachments.length },
       });
@@ -3098,10 +4663,10 @@ export class LeadsService {
         timestamp: colApp.createdAt,
         actor: colApp.pitchedBy
           ? {
-              id: colApp.pitchedBy.id,
-              name: `${colApp.pitchedBy.firstName} ${colApp.pitchedBy.lastName || ''}`.trim(),
-              role: colApp.pitchedBy.role?.name || 'User',
-            }
+            id: colApp.pitchedBy.id,
+            name: `${colApp.pitchedBy.firstName} ${colApp.pitchedBy.lastName || ''}`.trim(),
+            role: colApp.pitchedBy.role?.name || 'User',
+          }
           : null,
         metadata: {
           collegeId: colApp.collegeId,
@@ -3121,10 +4686,10 @@ export class LeadsService {
           timestamp: h.createdAt,
           actor: h.changedBy
             ? {
-                id: h.changedBy.id,
-                name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
-                role: h.changedBy.role?.name || 'User',
-              }
+              id: h.changedBy.id,
+              name: `${h.changedBy.firstName} ${h.changedBy.lastName || ''}`.trim(),
+              role: h.changedBy.role?.name || 'User',
+            }
             : null,
           metadata: {
             collegeId: colApp.collegeId,
@@ -3161,10 +4726,10 @@ export class LeadsService {
           timestamp: sl.issuedAt,
           actor: sl.issuedBy
             ? {
-                id: sl.issuedBy.id,
-                name: `${sl.issuedBy.firstName} ${sl.issuedBy.lastName || ''}`.trim(),
-                role: sl.issuedBy.role?.name || 'User',
-              }
+              id: sl.issuedBy.id,
+              name: `${sl.issuedBy.firstName} ${sl.issuedBy.lastName || ''}`.trim(),
+              role: sl.issuedBy.role?.name || 'User',
+            }
             : null,
           metadata: {
             collegeId: colApp.collegeId,
@@ -3183,10 +4748,10 @@ export class LeadsService {
           timestamp: pm.paidAt,
           actor: pm.processedBy
             ? {
-                id: pm.processedBy.id,
-                name: `${pm.processedBy.firstName} ${pm.processedBy.lastName || ''}`.trim(),
-                role: pm.processedBy.role?.name || 'User',
-              }
+              id: pm.processedBy.id,
+              name: `${pm.processedBy.firstName} ${pm.processedBy.lastName || ''}`.trim(),
+              role: pm.processedBy.role?.name || 'User',
+            }
             : null,
           metadata: {
             collegeId: colApp.collegeId,
@@ -3208,10 +4773,10 @@ export class LeadsService {
         timestamp: al.createdAt,
         actor: al.user
           ? {
-              id: al.user.id,
-              name: `${al.user.firstName} ${al.user.lastName || ''}`.trim(),
-              role: al.user.role?.name || 'User',
-            }
+            id: al.user.id,
+            name: `${al.user.firstName} ${al.user.lastName || ''}`.trim(),
+            role: al.user.role?.name || 'User',
+          }
           : null,
         metadata: {
           activity: al.activity,
@@ -3278,14 +4843,42 @@ export class LeadsService {
         dateOfBirth: lead.dateOfBirth,
         city: lead.city,
         state: lead.state,
+        preferredState: lead.preferredState,
+        preferredCity: lead.preferredCity,
+        preferredBudget: lead.preferredBudget != null ? Number(lead.preferredBudget) : null,
+        referredBy: lead.referredBy,
         tenthPercentage: lead.tenthPercentage,
         twelfthPercentage: lead.twelfthPercentage,
         graduationPercentage: lead.graduationPercentage,
         graduationCourse: lead.graduationCourse,
         graduationSpecialization: lead.graduationSpecialization,
         courseInterested: lead.courseInterested,
+        courseInterestedOther: lead.courseInterestedOther,
         specializationInterested: lead.specializationInterested,
         passingYear: lead.passingYear,
+        // Family Information
+        fatherName: lead.fatherName,
+        fatherOccupation: lead.fatherOccupation,
+        fatherPhone: lead.fatherPhone,
+        motherName: lead.motherName,
+        motherOccupation: lead.motherOccupation,
+        motherPhone: lead.motherPhone,
+        physicalAddress: lead.physicalAddress,
+        // 10th Academic Information
+        tenthSchoolName: lead.tenthSchoolName,
+        tenthBoard: lead.tenthBoard,
+        tenthPassoutYear: lead.tenthPassoutYear,
+        // 12th Academic Information
+        twelfthSchoolName: lead.twelfthSchoolName,
+        twelfthBoard: lead.twelfthBoard,
+        twelfthPassoutYear: lead.twelfthPassoutYear,
+        // Graduation Information
+        graduationCollegeName: lead.graduationCollegeName,
+        graduationUniversity: lead.graduationUniversity,
+        graduationPassoutYear: lead.graduationPassoutYear,
+        // Calling / Notes
+        bestTimeToCall: lead.bestTimeToCall,
+        notes: lead.notes,
         source: lead.source,
         createdAt: lead.createdAt,
         updatedAt: lead.updatedAt,
@@ -3298,17 +4891,17 @@ export class LeadsService {
         },
         finalCollege: lead.finalCollege
           ? {
-              id: lead.finalCollege.id,
-              name: lead.finalCollege.name,
-            }
+            id: lead.finalCollege.id,
+            name: lead.finalCollege.name,
+          }
           : null,
         createdBy: lead.createdBy
           ? {
-              id: lead.createdBy.id,
-              name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
-              email: lead.createdBy.email,
-              role: lead.createdBy.role?.name || 'User',
-            }
+            id: lead.createdBy.id,
+            name: `${lead.createdBy.firstName} ${lead.createdBy.lastName || ''}`.trim(),
+            email: lead.createdBy.email,
+            role: lead.createdBy.role?.name || 'User',
+          }
           : null,
       },
       summary,
@@ -3485,8 +5078,8 @@ export class LeadsService {
         .join(' ');
       const processedByName = req.processedBy
         ? [req.processedBy.firstName, req.processedBy.lastName]
-            .filter(Boolean)
-            .join(' ')
+          .filter(Boolean)
+          .join(' ')
         : null;
 
       return {
@@ -3509,10 +5102,10 @@ export class LeadsService {
         requestedAt: req.requestedAt,
         processedBy: req.processedBy
           ? {
-              id: req.processedBy.id,
-              name: processedByName,
-              email: req.processedBy.email,
-            }
+            id: req.processedBy.id,
+            name: processedByName,
+            email: req.processedBy.email,
+          }
           : null,
         processedAt: req.processedAt,
         remarks: req.remarks,
@@ -3720,7 +5313,448 @@ export class LeadsService {
           ownershipHistory,
         };
       },
-      { timeout: 30000 },
+      { maxWait: 10000, timeout: 30000 },
     );
+  }
+
+  /**
+   * Confirms receipt of a shared lead by the authorized receiving user.
+   * Business rules:
+   * 1. The lead must exist.
+  /**
+   * Acknowledges lead posting in college group.
+   * STRICT AUTHORIZATION:
+   * 1. Only an authorized Manager, Team Lead, or Super Admin can acknowledge lead posting.
+   * 2. Program Advisors CANNOT acknowledge lead posting.
+   * 3. Manager can only acknowledge leads within their authorized managed-team scope.
+   * 4. Team Lead can only acknowledge leads belonging to their supervised advisors.
+   * 5. Persists the acknowledging user's ID, timestamp, and status='ACKNOWLEDGED'.
+   */
+  async acknowledgeLead(
+    leadId: string,
+    callingUserId: string,
+    shareId?: string,
+  ) {
+    if (
+      !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+        leadId,
+      )
+    ) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    const callingUser = await this.prisma.user.findUnique({
+      where: { id: callingUserId },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        role: { select: { name: true } },
+      },
+    });
+
+    if (!callingUser) {
+      throw new NotFoundException('User not found');
+    }
+
+    const roleName = (callingUser.role?.name || '').toUpperCase().replace(/\s+/g, '_');
+    const isSuperAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(roleName);
+    const isManager = roleName.includes('MANAGER');
+    const isTeamLead = await this.teamLeadAuthService.isTeamLead(callingUserId);
+
+    if (!isSuperAdmin && !isManager && !isTeamLead) {
+      throw new ForbiddenException(
+        'Access denied: Only an authorized Manager or Team Lead can acknowledge a lead-posting event.',
+      );
+    }
+
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        createdBy: { select: { id: true, teamId: true, managerId: true } },
+        assignments: {
+          where: { status: 'ACTIVE' },
+          orderBy: { assignedAt: 'desc' },
+          include: {
+            user: { select: { id: true, teamId: true, managerId: true } },
+          },
+        },
+      },
+    });
+
+    if (!lead) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    // Verify team scoping
+    if (!isSuperAdmin) {
+      if (isManager) {
+        const managedMemberIds = await this.getManagerTeamMemberIds(callingUserId);
+        const managedTeams = await this.prisma.team.findMany({
+          where: { managerId: callingUserId, isActive: true },
+          select: { id: true },
+        });
+        const managedTeamIds = managedTeams.map((t) => t.id);
+
+        const isCreatedByManaged =
+          managedMemberIds.includes(lead.createdById) || lead.createdById === callingUserId;
+        const isAssignedToManaged = lead.assignments.some(
+          (a) => managedMemberIds.includes(a.userId) || a.userId === callingUserId,
+        );
+        const isTeamMatch =
+          (lead.teamId && managedTeamIds.includes(lead.teamId)) ||
+          (lead.createdBy?.teamId && managedTeamIds.includes(lead.createdBy.teamId));
+
+        if (!isCreatedByManaged && !isAssignedToManaged && !isTeamMatch) {
+          throw new ForbiddenException(
+            'Access denied: You can only acknowledge leads within your managed team scope.',
+          );
+        }
+      } else if (isTeamLead) {
+        const supervisedAdvisorIds =
+          await this.teamLeadAuthService.getTeamLeadAdvisorIds(callingUserId);
+        const authorizedIds = new Set([callingUserId, ...supervisedAdvisorIds]);
+
+        const isCreatedBySupervised = authorizedIds.has(lead.createdById);
+        const isAssignedToSupervised = lead.assignments.some((a) =>
+          authorizedIds.has(a.userId),
+        );
+
+        if (!isCreatedBySupervised && !isAssignedToSupervised) {
+          throw new ForbiddenException(
+            'Access denied: You can only acknowledge leads belonging to your supervised advisors.',
+          );
+        }
+      }
+    }
+
+    const now = new Date();
+
+    // If specific shareId is provided, acknowledge that share
+    if (shareId) {
+      const targetShare = await this.prisma.leadAcknowledgement.findUnique({
+        where: { id: shareId },
+        include: {
+          recipient: { select: { id: true, firstName: true, lastName: true, phone: true } },
+          acknowledgedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              role: { select: { id: true, name: true } },
+              teamsManaged: { select: { id: true } },
+              teamLeads: { select: { teamId: true } },
+            },
+          },
+          sharedBy: { select: { id: true, firstName: true, lastName: true } },
+          college: { select: { id: true, name: true } },
+        },
+      });
+
+      if (!targetShare || targetShare.leadId !== leadId) {
+        throw new NotFoundException('Share record not found for this lead');
+      }
+
+      if (targetShare.acknowledgedAt) {
+        return {
+          message: 'Lead share posting is already acknowledged.',
+          acknowledgement: targetShare,
+        };
+      }
+
+      const ack = await this.prisma.leadAcknowledgement.update({
+        where: { id: shareId },
+        data: {
+          acknowledgedById: callingUserId,
+          acknowledgedAt: now,
+          status: 'ACKNOWLEDGED',
+        },
+        include: {
+          recipient: { select: { id: true, firstName: true, lastName: true, phone: true } },
+          acknowledgedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              role: { select: { id: true, name: true } },
+              teamsManaged: { select: { id: true } },
+              teamLeads: { select: { teamId: true } },
+            },
+          },
+          sharedBy: { select: { id: true, firstName: true, lastName: true } },
+          college: { select: { id: true, name: true } },
+        },
+      });
+
+      const callingUserName = [callingUser.firstName, callingUser.lastName].filter(Boolean).join(' ');
+      await this.prisma.activityLog.create({
+        data: {
+          userId: callingUserId,
+          activity: 'LEAD',
+          entityType: 'LEAD',
+          entityId: leadId,
+          description: `Lead posting in college group verified and acknowledged by ${callingUserName}`,
+        },
+      });
+
+      return {
+        message: 'Lead posting acknowledged successfully',
+        acknowledgement: ack,
+      };
+    }
+
+    // Otherwise, find the latest pending share for this lead
+    const pendingShare = await this.prisma.leadAcknowledgement.findFirst({
+      where: {
+        leadId,
+        acknowledgedAt: null,
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        recipient: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        college: { select: { id: true, name: true } },
+      },
+    });
+
+    if (pendingShare) {
+      const ack = await this.prisma.leadAcknowledgement.update({
+        where: { id: pendingShare.id },
+        data: {
+          acknowledgedById: callingUserId,
+          acknowledgedAt: now,
+          status: 'ACKNOWLEDGED',
+        },
+        include: {
+          recipient: { select: { id: true, firstName: true, lastName: true, phone: true } },
+          acknowledgedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              role: { select: { id: true, name: true } },
+              teamsManaged: { select: { id: true } },
+              teamLeads: { select: { teamId: true } },
+            },
+          },
+          sharedBy: { select: { id: true, firstName: true, lastName: true } },
+          college: { select: { id: true, name: true } },
+        },
+      });
+
+      const callingUserName = [callingUser.firstName, callingUser.lastName].filter(Boolean).join(' ');
+      await this.prisma.activityLog.create({
+        data: {
+          userId: callingUserId,
+          activity: 'LEAD',
+          entityType: 'LEAD',
+          entityId: leadId,
+          description: `Lead posting in college group verified and acknowledged by ${callingUserName}`,
+        },
+      });
+
+      return {
+        message: 'Lead posting acknowledged successfully',
+        acknowledgement: ack,
+      };
+    }
+
+    // Check if latest share was already acknowledged
+    const latestShare = await this.prisma.leadAcknowledgement.findFirst({
+      where: { leadId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        recipient: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        acknowledgedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            role: { select: { id: true, name: true } },
+            teamsManaged: { select: { id: true } },
+            teamLeads: { select: { teamId: true } },
+          },
+        },
+        sharedBy: { select: { id: true, firstName: true, lastName: true } },
+        college: { select: { id: true, name: true } },
+      },
+    });
+
+    if (latestShare && latestShare.acknowledgedAt) {
+      return {
+        message: 'Lead posting is already acknowledged.',
+        acknowledgement: latestShare,
+      };
+    }
+
+    const targetRecipientId = lead.assignments[0]?.userId || lead.createdById || callingUserId;
+    const directAck = await this.prisma.leadAcknowledgement.create({
+      data: {
+        leadId,
+        recipientId: targetRecipientId,
+        status: 'ACKNOWLEDGED',
+        acknowledgedById: callingUserId,
+        acknowledgedAt: now,
+        channel: 'DIRECT',
+        context: 'Lead acknowledged by management',
+      },
+      include: {
+        recipient: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        acknowledgedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            role: { select: { id: true, name: true } },
+            teamsManaged: { select: { id: true } },
+            teamLeads: { select: { teamId: true } },
+          },
+        },
+        sharedBy: { select: { id: true, firstName: true, lastName: true } },
+        college: { select: { id: true, name: true } },
+      },
+    });
+
+    const callingUserName = [callingUser.firstName, callingUser.lastName].filter(Boolean).join(' ');
+    await this.prisma.activityLog.create({
+      data: {
+        userId: callingUserId,
+        activity: 'LEAD',
+        entityType: 'LEAD',
+        entityId: leadId,
+        description: `Lead verified and acknowledged by ${callingUserName}`,
+      },
+    });
+
+    return {
+      message: 'Lead acknowledged successfully',
+      acknowledgement: directAck,
+    };
+  }
+
+  /**
+   * Records a new share event (e.g. via WhatsApp).
+   * Every share creates a separate history entry with its own acknowledgement.
+   * Note: Opening WhatsApp or copying does NOT mark the lead as acknowledged.
+   */
+  async shareLead(
+    leadId: string,
+    callingUserId: string,
+    channel: string = 'WHATSAPP',
+    context?: string,
+    recipientId?: string,
+    collegeId?: string,
+  ) {
+    if (
+      !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+        leadId,
+      )
+    ) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    const lead = await this.prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        assignments: {
+          where: { status: 'ACTIVE' },
+          orderBy: { assignedAt: 'desc' },
+        },
+      },
+    });
+
+    if (!lead) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    const now = new Date();
+    const activeAssignment = lead.assignments.find(
+      (a) => a.expiresAt && new Date(a.expiresAt) > now,
+    );
+
+    const targetRecipientId = recipientId || activeAssignment?.userId || callingUserId;
+
+    // Resolve collegeId if not explicitly provided but context has a college name
+    let resolvedCollegeId = collegeId;
+    if (!resolvedCollegeId && context) {
+      const matchedCollege = await this.prisma.college.findFirst({
+        where: { name: { equals: context.trim(), mode: 'insensitive' } },
+        select: { id: true },
+      });
+      if (matchedCollege) {
+        resolvedCollegeId = matchedCollege.id;
+      }
+    }
+
+    // Every share creates a separate history entry with its own acknowledgement.
+    // Previous acknowledgements remain intact; new posting starts as PENDING.
+    const share = await this.prisma.leadAcknowledgement.create({
+      data: {
+        leadId,
+        recipientId: targetRecipientId,
+        collegeId: resolvedCollegeId || null,
+        sharedById: callingUserId,
+        sharedAt: now,
+        channel,
+        context: context || null,
+        status: 'PENDING',
+        acknowledgedById: null,
+        acknowledgedAt: null,
+      },
+      include: {
+        recipient: {
+          select: { id: true, firstName: true, lastName: true, phone: true },
+        },
+        sharedBy: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+        college: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    return {
+      message: 'Lead share recorded successfully',
+      share,
+    };
+  }
+
+  /**
+   * Retrieves complete share and acknowledgement history for a lead.
+   */
+  async getLeadShares(leadId: string) {
+    if (
+      !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+        leadId,
+      )
+    ) {
+      throw new NotFoundException('Lead not found');
+    }
+
+    return this.prisma.leadAcknowledgement.findMany({
+      where: { leadId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        recipient: {
+          select: { id: true, firstName: true, lastName: true, phone: true, email: true },
+        },
+        acknowledgedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            role: { select: { id: true, name: true } },
+            teamsManaged: { select: { id: true } },
+            teamLeads: { select: { teamId: true } },
+          },
+        },
+        sharedBy: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+        college: {
+          select: { id: true, name: true },
+        },
+      },
+    });
   }
 }

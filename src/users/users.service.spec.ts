@@ -3,6 +3,7 @@ import { UsersService } from './users.service';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ActivityLogService } from 'src/activity-log/activity-log.service';
+import { TeamLeadAuthorizationService } from 'src/teams/team-lead-authorization.service';
 import { ForbiddenException, ConflictException } from '@nestjs/common';
 import { UserStatus } from '@prisma/client';
 
@@ -23,6 +24,15 @@ describe('UsersService - Single Super Admin Enforcements', () => {
       create: jest.fn(),
       update: jest.fn(),
     },
+    team: {
+      findMany: jest.fn(),
+    },
+    teamLead: {
+      findMany: jest.fn(),
+    },
+    teamLeadAdvisor: {
+      findMany: jest.fn(),
+    },
     activityLog: {
       create: jest.fn(),
     },
@@ -37,6 +47,15 @@ describe('UsersService - Single Super Admin Enforcements', () => {
     createLog: jest.fn().mockResolvedValue(true),
   };
 
+  const mockTeamLeadAuthService = {
+    isTeamLead: jest.fn().mockResolvedValue(false),
+    getTeamLeadAdvisorIds: jest.fn().mockResolvedValue([]),
+    getTeamLeadAssignedTeamIds: jest.fn().mockResolvedValue([]),
+    canTeamLeadAccessTeam: jest.fn().mockResolvedValue(false),
+    canTeamLeadAccessAdvisor: jest.fn().mockResolvedValue(false),
+    canTeamLeadAccessLead: jest.fn().mockResolvedValue(false),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -44,6 +63,10 @@ describe('UsersService - Single Super Admin Enforcements', () => {
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: JwtService, useValue: mockJwtService },
         { provide: ActivityLogService, useValue: mockActivityLogService },
+        {
+          provide: TeamLeadAuthorizationService,
+          useValue: mockTeamLeadAuthService,
+        },
       ],
     }).compile();
 
@@ -137,7 +160,105 @@ describe('UsersService - Single Super Admin Enforcements', () => {
 
       await expect(
         service.updateStatus('super-admin-id', UserStatus.INACTIVE, 'other-id'),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe('findAll Authorization Scoping', () => {
+    it('1. Super Admin sees all users', async () => {
+      mockPrismaService.user.findUnique.mockResolvedValue({
+        id: 'super-admin-id',
+        role: { name: 'SUPER_ADMIN' },
+      });
+      mockPrismaService.user.findMany.mockResolvedValue([
+        { id: 'u1' },
+        { id: 'u2' },
+      ]);
+
+      const result = await service.findAll({ sub: 'super-admin-id' });
+
+      expect(mockPrismaService.user.findMany).toHaveBeenCalledWith({
+        where: {},
+        select: expect.any(Object),
+      });
+      expect(result).toHaveLength(2);
+    });
+
+    it('2. Manager sees only team scope users and themselves', async () => {
+      mockPrismaService.user.findUnique.mockResolvedValue({
+        id: 'manager-id',
+        role: { name: 'Manager' },
+        teamId: 10,
+      });
+      mockPrismaService.team.findMany.mockResolvedValue([{ id: 10 }]);
+      mockPrismaService.user.findMany
+        .mockResolvedValueOnce([{ id: 'advisor-1' }, { id: 'advisor-2' }]) // teamMembers query
+        .mockResolvedValueOnce([{ id: 'manager-id' }, { id: 'advisor-1' }, { id: 'advisor-2' }, { id: 'tl-1' }, { id: 'supervised-adv-1' }]); // final query
+      mockPrismaService.teamLead.findMany.mockResolvedValue([{ userId: 'tl-1' }]);
+      mockPrismaService.teamLeadAdvisor.findMany.mockResolvedValue([{ advisorId: 'supervised-adv-1' }]);
+
+      await service.findAll({ sub: 'manager-id' });
+
+      expect(mockPrismaService.user.findMany).toHaveBeenLastCalledWith({
+        where: {
+          id: {
+            in: expect.arrayContaining([
+              'manager-id',
+              'advisor-1',
+              'advisor-2',
+              'tl-1',
+              'supervised-adv-1',
+            ]),
+          },
+        },
+        select: expect.any(Object),
+      });
+    });
+
+    it('3. Team Lead sees only assigned advisors and themselves', async () => {
+      mockPrismaService.user.findUnique.mockResolvedValue({
+        id: 'tl-id',
+        role: { name: 'Team Lead' },
+      });
+      mockPrismaService.team.findMany.mockResolvedValue([]);
+      mockTeamLeadAuthService.isTeamLead.mockResolvedValue(true);
+      mockTeamLeadAuthService.getTeamLeadAdvisorIds.mockResolvedValue([
+        'adv-1',
+        'adv-2',
+      ]);
+      mockPrismaService.user.findMany.mockResolvedValue([
+        { id: 'tl-id' },
+        { id: 'adv-1' },
+        { id: 'adv-2' },
+      ]);
+
+      await service.findAll({ sub: 'tl-id' });
+
+      expect(mockPrismaService.user.findMany).toHaveBeenCalledWith({
+        where: {
+          id: {
+            in: expect.arrayContaining(['tl-id', 'adv-1', 'adv-2']),
+          },
+        },
+        select: expect.any(Object),
+      });
+    });
+
+    it('4. Program Advisor sees only themselves', async () => {
+      mockPrismaService.user.findUnique.mockResolvedValue({
+        id: 'pa-id',
+        role: { name: 'Program Advisor' },
+      });
+      mockPrismaService.team.findMany.mockResolvedValue([]);
+      mockTeamLeadAuthService.isTeamLead.mockResolvedValue(false);
+      mockPrismaService.user.findMany.mockResolvedValue([{ id: 'pa-id' }]);
+
+      await service.findAll({ sub: 'pa-id' });
+
+      expect(mockPrismaService.user.findMany).toHaveBeenCalledWith({
+        where: { id: 'pa-id' },
+        select: expect.any(Object),
+      });
     });
   });
 });

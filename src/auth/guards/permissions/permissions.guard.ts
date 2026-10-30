@@ -88,6 +88,13 @@ export class PermissionsGuard implements CanActivate {
       for (const p of allPermissions) {
         userPermissionsMap[p.name] = PermissionScope.ALL;
       }
+
+      // Also inject any requested permissions just in case they haven't been seeded yet
+      if (requiredPermissions && requiredPermissions.length > 0) {
+        for (const reqPerm of requiredPermissions) {
+          userPermissionsMap[reqPerm] = PermissionScope.ALL;
+        }
+      }
     }
 
     request.userPermissions = userPermissionsMap;

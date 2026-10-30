@@ -53,7 +53,7 @@ export class PrismaService
           async $allOperations({ model, operation, args, query }) {
             let result;
             let attempts = 0;
-            const maxAttempts = 5;
+            const maxAttempts = 10;
             while (attempts < maxAttempts) {
               try {
                 result = await query(args);
@@ -69,21 +69,27 @@ export class PrismaService
                     errCode === 'P1002' ||
                     errCode === 'P1003' ||
                     errCode === 'P1017' ||
+                    errCode === 'P2024' ||
+                    errCode === '26000' ||
+                    errCode === '42P05' ||
                     errMsg.includes("Can't reach database server") ||
                     errMsg.includes('Connection reset') ||
                     errMsg.includes('Closed connection') ||
                     errMsg.includes('EMAXCONNSESSION') ||
                     errMsg.includes('max clients') ||
+                    errMsg.includes('prepared statement') ||
                     errMsg.includes('timeout') ||
                     errMsg.includes('EngineTerminatedError'));
 
                 if (isTransient && attempts < maxAttempts) {
-                  console.warn(
-                    `[PrismaService] Transient DB connection pool glitch (${errCode || 'pool'}, attempt ${attempts}/${maxAttempts}). Retrying in backoff...`,
-                  );
+                  if (attempts >= 6) {
+                    console.warn(
+                      `[PrismaService] Transient DB connection pool glitch (${errCode || 'pool'}, attempt ${attempts}/${maxAttempts}). Retrying in backoff...`,
+                    );
+                  }
                   const jitter = Math.floor(Math.random() * 150);
                   await new Promise((res) =>
-                    setTimeout(res, 400 * attempts + jitter),
+                    setTimeout(res, 200 * attempts + jitter),
                   );
                 } else {
                   throw err;

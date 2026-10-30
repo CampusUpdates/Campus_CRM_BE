@@ -1,13 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { LeadsService } from './leads.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { TeamLeadAuthorizationService } from '../teams/team-lead-authorization.service';
 import { CollegeStatus, LeadSource } from '@prisma/client';
 
 describe('LeadsService - College Pitch Approval Rules', () => {
   let service: LeadsService;
   let prismaMock: any;
+  let teamLeadAuthService: any;
 
   const validLeadUuid = '11111111-1111-4111-8111-111111111111';
   const validUserUuid = '22222222-2222-4222-8222-222222222222';
@@ -36,6 +38,8 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       lead: {
         findFirst: jest.fn().mockResolvedValue(null),
         findUnique: jest.fn().mockResolvedValue(mockLead),
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
         create: jest.fn().mockResolvedValue(mockLead),
         update: jest.fn().mockResolvedValue(mockLead),
       },
@@ -57,6 +61,7 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           ),
         findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(null),
+        findUnique: jest.fn().mockResolvedValue(null),
       },
       leadCollegeInterview: {
         findFirst: jest.fn().mockResolvedValue(null),
@@ -72,9 +77,26 @@ describe('LeadsService - College Pitch Approval Rules', () => {
       leadAssignment: {
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       leadOwnershipHistory: {
         create: jest.fn().mockResolvedValue({}),
+      },
+      user: {
+        findUnique: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      notification: {
+        create: jest.fn().mockResolvedValue({ id: 'notif-1' }),
+      },
+      notificationRecipient: {
+        create: jest.fn().mockResolvedValue({}),
+      },
+      team: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      teamMember: {
+        findMany: jest.fn().mockResolvedValue([]),
       },
       $transaction: jest.fn((cb) => cb(prismaMock)),
     };
@@ -87,10 +109,24 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           provide: NotificationsService,
           useValue: { createNotification: jest.fn() },
         },
+        {
+          provide: TeamLeadAuthorizationService,
+          useValue: {
+            isTeamLead: jest.fn().mockResolvedValue(false),
+            getTeamLeadAdvisorIds: jest.fn().mockResolvedValue([]),
+            getTeamLeadAssignedTeamIds: jest.fn().mockResolvedValue([]),
+            canTeamLeadAccessTeam: jest.fn().mockResolvedValue(false),
+            canTeamLeadAccessAdvisor: jest.fn().mockResolvedValue(false),
+            canTeamLeadAccessLead: jest.fn().mockResolvedValue(false),
+          },
+        },
       ],
     }).compile();
 
     service = module.get<LeadsService>(LeadsService);
+    teamLeadAuthService = module.get<TeamLeadAuthorizationService>(
+      TeamLeadAuthorizationService,
+    );
   });
 
   const createDto = {
@@ -490,6 +526,341 @@ describe('LeadsService - College Pitch Approval Rules', () => {
           interview: { scheduledAt: new Date().toISOString() },
         },
         mockUser,
+      );
+
+      expect(result).toBeDefined();
+    });
+  });
+
+  describe('Team Lead College Approvals Scope & Authorization', () => {
+    const tlUserUuid = 'tl-user-1111-2222-3333-444444444444';
+    const pa1Uuid = 'pa-1111-1111-1111-111111111111';
+    const pa2Uuid = 'pa-2222-2222-2222-222222222222';
+    const pa3Uuid = 'pa-3333-3333-3333-333333333333';
+
+    it('1. should scope getPitchApprovals for Team Lead strictly to supervised PAs', async () => {
+      const teamLeadAuthMock = service['teamLeadAuthService'] as any;
+      teamLeadAuthMock.isTeamLead.mockResolvedValue(true);
+      teamLeadAuthMock.getTeamLeadAdvisorIds.mockResolvedValue([pa1Uuid, pa2Uuid]);
+
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: tlUserUuid,
+        role: { name: 'Team Lead' },
+      });
+      prismaMock.leadCollege.findMany.mockResolvedValue([
+        { id: 'pitch-1', pitchedById: pa1Uuid, approvalStatus: CollegeStatus.PENDING },
+        { id: 'pitch-2', pitchedById: pa2Uuid, approvalStatus: CollegeStatus.PENDING },
+      ]);
+
+      const result = await service.getPitchApprovals({ sub: tlUserUuid }, 'TEAM', CollegeStatus.PENDING);
+
+      expect(prismaMock.leadCollege.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            approvalStatus: CollegeStatus.PENDING,
+            pitchedById: { in: [tlUserUuid, pa1Uuid, pa2Uuid] },
+          }),
+        }),
+      );
+      expect(result.length).toBe(2);
+    });
+
+    it('2. should return list with Team Lead own pitches for Team Lead with NO assigned PAs', async () => {
+      const teamLeadAuthMock = service['teamLeadAuthService'] as any;
+      teamLeadAuthMock.isTeamLead.mockResolvedValue(true);
+      teamLeadAuthMock.getTeamLeadAdvisorIds.mockResolvedValue([]);
+
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: tlUserUuid,
+        role: { name: 'Team Lead' },
+      });
+      prismaMock.leadCollege.findMany.mockResolvedValue([]);
+
+      const result = await service.getPitchApprovals({ sub: tlUserUuid }, 'TEAM');
+
+      expect(prismaMock.leadCollege.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            pitchedById: { in: [tlUserUuid] },
+          }),
+        }),
+      );
+      expect(result.length).toBe(0);
+    });
+
+    it('3. should allow Team Lead to approve a pitch for a supervised PA', async () => {
+      const teamLeadAuthMock = service['teamLeadAuthService'] as any;
+      teamLeadAuthMock.isTeamLead.mockResolvedValue(true);
+      teamLeadAuthMock.getTeamLeadAdvisorIds.mockResolvedValue([pa1Uuid]);
+
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: tlUserUuid,
+        role: { name: 'Team Lead' },
+      });
+      prismaMock.leadCollege.findUnique.mockResolvedValue({
+        id: 'pitch-100',
+        pitchedById: pa1Uuid,
+        approvalStatus: CollegeStatus.PENDING,
+        lead: { firstName: 'Alice', lastName: 'Smith' },
+        college: { name: 'Harvard Business' },
+      });
+
+      prismaMock.leadCollege.update.mockResolvedValue({
+        id: 'pitch-100',
+        approvalStatus: CollegeStatus.APPROVED,
+        processedById: tlUserUuid,
+      });
+      prismaMock.notification.create.mockResolvedValue({ id: 'notif-1' });
+      prismaMock.notificationRecipient.create.mockResolvedValue({});
+
+      const res = await service.processPitchApproval('pitch-100', CollegeStatus.APPROVED, { sub: tlUserUuid });
+
+      expect(prismaMock.leadCollege.update).toHaveBeenCalledWith({
+        where: { id: 'pitch-100' },
+        data: {
+          approvalStatus: CollegeStatus.APPROVED,
+          processedById: tlUserUuid,
+        },
+      });
+    });
+
+    it('4. should reject processPitchApproval with ForbiddenException if pitch belongs to unsupervised PA', async () => {
+      const teamLeadAuthMock = service['teamLeadAuthService'] as any;
+      teamLeadAuthMock.isTeamLead.mockResolvedValue(true);
+      teamLeadAuthMock.getTeamLeadAdvisorIds.mockResolvedValue([pa1Uuid]);
+
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: tlUserUuid,
+        role: { name: 'Team Lead' },
+      });
+      prismaMock.leadCollege.findUnique.mockResolvedValue({
+        id: 'pitch-200',
+        pitchedById: pa3Uuid, // PA3 is NOT supervised by this Team Lead!
+        approvalStatus: CollegeStatus.PENDING,
+        lead: { firstName: 'Bob', lastName: 'Jones' },
+        college: { name: 'Stanford Tech' },
+      });
+
+      await expect(
+        service.processPitchApproval('pitch-200', CollegeStatus.APPROVED, { sub: tlUserUuid }),
+      ).rejects.toThrow(
+        'You can only process college approval requests for yourself or your supervised Program Advisors.',
+      );
+    });
+  });
+
+  describe('LeadCollege Status Isolation', () => {
+    const leadCollegeA_Id = 'lc-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const leadCollegeB_Id = 'lc-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+    const statusLead = { id: 1, name: 'LEAD', isActive: true, displayOrder: 1 };
+    const statusInterview = { id: 3, name: 'INTERVIEW_SCHEDULED', isActive: true, displayOrder: 3 };
+
+    const leadWithTwoColleges = {
+      ...mockLead,
+      statusId: 1,
+      status: statusLead,
+      assignments: [{ userId: validUserUuid, user: { id: validUserUuid, teamId: 1 }, status: 'ACTIVE', expiresAt: new Date(Date.now() + 86400000) }],
+      collegeApplications: [
+        {
+          id: leadCollegeA_Id,
+          leadId: validLeadUuid,
+          collegeId: validCollegeUuid1,
+          statusId: 1,
+          status: statusLead,
+          approvalStatus: 'APPROVED',
+          college: { id: validCollegeUuid1, name: 'College A' },
+        },
+        {
+          id: leadCollegeB_Id,
+          leadId: validLeadUuid,
+          collegeId: validCollegeUuid2,
+          statusId: 1,
+          status: statusLead,
+          approvalStatus: 'APPROVED',
+          college: { id: validCollegeUuid2, name: 'College B' },
+        },
+      ],
+    };
+
+    it('should update only the targeted LeadCollege status without touching Lead.statusId or other colleges', async () => {
+      // Setup mocks
+      prismaMock.lead.findUnique.mockResolvedValue(leadWithTwoColleges);
+      prismaMock.leadStatus.findUnique.mockResolvedValue(statusInterview);
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: validUserUuid,
+        role: { name: 'PROGRAM_ADVISOR' },
+      });
+
+      // resolveLeadCollege will find college A by leadCollegeId
+      prismaMock.leadCollege.findFirst.mockResolvedValue({
+        id: leadCollegeA_Id,
+        leadId: validLeadUuid,
+        collegeId: validCollegeUuid1,
+        statusId: 1,
+        approvalStatus: 'APPROVED',
+        college: { id: validCollegeUuid1, name: 'College A' },
+        status: statusLead,
+      });
+
+      prismaMock.leadCollegeInterview.findFirst.mockResolvedValue(null);
+      prismaMock.leadCollegeInterview.create.mockResolvedValue({ id: 'int-1' });
+      prismaMock.leadCollegeHistory.create.mockResolvedValue({ id: 'hist-1' });
+      prismaMock.activityLog.create.mockResolvedValue({});
+      prismaMock.leadCollege.update.mockResolvedValue({
+        id: leadCollegeA_Id,
+        statusId: statusInterview.id,
+      });
+
+      // Return refreshed lead after update
+      prismaMock.lead.findUnique
+        .mockResolvedValueOnce(leadWithTwoColleges) // First call: re-fetch lead
+        .mockResolvedValueOnce({
+          ...leadWithTwoColleges,
+          // Lead.statusId should remain 1 (LEAD), NOT change to 3 (INTERVIEW_SCHEDULED)
+          statusId: 1,
+          collegeApplications: [
+            { ...leadWithTwoColleges.collegeApplications[0], statusId: statusInterview.id },
+            { ...leadWithTwoColleges.collegeApplications[1] }, // College B unchanged
+          ],
+        });
+
+      await service.updatePipeline(
+        validLeadUuid,
+        {
+          statusId: statusInterview.id,
+          collegeId: validCollegeUuid1,
+          leadCollegeId: leadCollegeA_Id,
+          interview: { scheduledAt: new Date().toISOString() },
+        },
+        { sub: validUserUuid },
+        'ALL',
+      );
+
+      // 1. LeadCollege A should have been updated to INTERVIEW_SCHEDULED
+      expect(prismaMock.leadCollege.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: leadCollegeA_Id },
+          data: { statusId: statusInterview.id },
+        }),
+      );
+
+      // 2. Lead.statusId should NOT have been updated (college-specific transition)
+      const leadUpdateCalls = prismaMock.lead.update.mock.calls;
+      const globalStatusUpdates = leadUpdateCalls.filter(
+        (call: any[]) => call[0]?.data?.statusId === statusInterview.id,
+      );
+      expect(globalStatusUpdates.length).toBe(0);
+
+      // 3. LeadCollegeHistory should record the correct per-college fromStatusId
+      expect(prismaMock.leadCollegeHistory.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            leadCollegeId: leadCollegeA_Id,
+            fromStatusId: 1, // College A's own previous statusId, NOT Lead.statusId
+            toStatusId: statusInterview.id,
+          }),
+        }),
+      );
+    });
+  });
+
+  describe('Program Advisor Lead Ownership Enforcement (findAll)', () => {
+    const advisorUserId = 'advisor-uuid-1111';
+    const otherUserId = 'advisor-uuid-2222';
+
+    beforeEach(() => {
+      prismaMock.team.findMany.mockResolvedValue([]);
+      prismaMock.teamMember.findMany.mockResolvedValue([]);
+      teamLeadAuthService.isTeamLead.mockResolvedValue(false);
+    });
+
+    it('should reject a Program Advisor trying to filter by another advisor ownerId with ForbiddenException', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: advisorUserId,
+        role: { name: 'PROGRAM_ADVISOR' },
+        teamId: 10,
+      });
+
+      await expect(
+        service.findAll(
+          { sub: advisorUserId },
+          { ownerId: otherUserId },
+          'OWN',
+        ),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should reject a Program Advisor trying to filter by UNASSIGNED ownerId with ForbiddenException', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: advisorUserId,
+        role: { name: 'PA' },
+        teamId: 10,
+      });
+
+      await expect(
+        service.findAll(
+          { sub: advisorUserId },
+          { ownerId: 'UNASSIGNED' },
+          'OWN',
+        ),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should allow a Program Advisor to query their own leads without ownerId filter', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: advisorUserId,
+        role: { name: 'PROGRAM_ADVISOR' },
+        teamId: 10,
+      });
+      prismaMock.lead.findMany.mockResolvedValue([]);
+      prismaMock.lead.count.mockResolvedValue(0);
+
+      const result = await service.findAll(
+        { sub: advisorUserId },
+        {},
+        'OWN',
+      );
+
+      expect(result).toBeDefined();
+      expect(prismaMock.lead.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            AND: expect.arrayContaining([
+              expect.objectContaining({
+                OR: [
+                  { assignments: { some: { userId: advisorUserId } } },
+                  {
+                    createdById: advisorUserId,
+                    assignments: {
+                      none: {
+                        userId: { not: advisorUserId },
+                        status: 'ACTIVE',
+                        expiresAt: expect.any(Object),
+                      },
+                    },
+                  },
+                ],
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it('should allow Super Admin or Manager to filter by any ownerId', async () => {
+      prismaMock.user.findUnique.mockResolvedValue({
+        id: 'manager-uuid-9999',
+        role: { name: 'MANAGER' },
+        teamId: 10,
+      });
+      prismaMock.lead.findMany.mockResolvedValue([]);
+      prismaMock.lead.count.mockResolvedValue(0);
+
+      const result = await service.findAll(
+        { sub: 'manager-uuid-9999' },
+        { ownerId: otherUserId },
+        'MANAGED',
       );
 
       expect(result).toBeDefined();

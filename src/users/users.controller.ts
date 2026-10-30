@@ -23,7 +23,7 @@ import { ReplaceSuperAdminDto } from './dto/replace-super-admin.dto';
 
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(private readonly usersService: UsersService) { }
 
   // Get logged-in user profile
   @UseGuards(JwtAuthGuard)
@@ -44,8 +44,8 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Get()
-  findAll() {
-    return this.usersService.findAll();
+  findAll(@Req() req: AuthenticatedRequest) {
+    return this.usersService.findAll(req.user);
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -61,8 +61,8 @@ export class UsersController {
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermission('USER_MANAGE')
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.usersService.findOne(id);
+  findOne(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    return this.usersService.findOne(id, req.user);
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)

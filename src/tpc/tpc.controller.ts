@@ -6,12 +6,14 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
 import { TpcService } from './tpc.service';
 import { AssignTpcDto } from './dto/assign-tpc.dto';
 import { UpdateTpcStatusDto } from './dto/update-tpc-status.dto';
+import { GetTpcReportDto } from './dto/get-tpc-report.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
 import type { AuthenticatedRequest } from 'src/auth/interfaces/authenticated-request.interface';
 
@@ -23,6 +25,12 @@ export class TpcController {
   @Get()
   getAllTpcs(@Req() req: AuthenticatedRequest) {
     return this.tpcService.getAllTpcs(req.user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('users')
+  getEligibleUsers() {
+    return this.tpcService.getSelectableUsers();
   }
 
   @UseGuards(JwtAuthGuard)
@@ -70,5 +78,32 @@ export class TpcController {
   @Delete('assignment/:assignmentId')
   removeAssignment(@Param('assignmentId') assignmentId: string) {
     return this.tpcService.removeAssignment(assignmentId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('reports')
+  getTpcReports(
+    @Req() req: AuthenticatedRequest,
+    @Query() query: GetTpcReportDto,
+  ) {
+    return this.tpcService.getTpcReports(req.user.sub, query);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('history/lead/:leadId')
+  getTpcHistoryForLead(
+    @Param('leadId') leadId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.tpcService.getTpcHistoryForLead(leadId, req.user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('history/assignment/:assignmentId')
+  getTpcHistoryForAssignment(
+    @Param('assignmentId') assignmentId: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.tpcService.getTpcHistoryForAssignment(assignmentId, req.user.sub);
   }
 }

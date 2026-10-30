@@ -42,4 +42,8 @@ export class CreateOfficeDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  locationValidationEnabled?: boolean;
 }

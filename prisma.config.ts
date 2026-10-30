@@ -5,7 +5,10 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 import { defineConfig } from "prisma/config";
 
-dotenv.config({ path: path.resolve(__dirname, '.env') });
+const envResult = dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true });
+if (envResult.parsed) {
+  Object.assign(process.env, envResult.parsed);
+}
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
@@ -15,5 +18,6 @@ export default defineConfig({
   engine: "classic",
   datasource: {
     url: process.env.DATABASE_URL!,
+    directUrl: process.env.DIRECT_URL,
   },
 });
