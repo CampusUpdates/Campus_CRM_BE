@@ -1,4 +1,3 @@
-
 name: Campus CRM Backend - Production
 
 on:
@@ -38,3 +37,88 @@ jobs:
 
       - name: Build NestJS application
         run: npm run build
+
+  deploy-production:
+    name: Deploy to Hostinger Production
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to production VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -eu
+
+            cd /var/www/campus-crm
+
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "ERROR: Production has uncommitted tracked changes. Deployment aborted."
+              exit 1
+            fi
+
+            echo "===== RECORD PREVIOUS VERSION ====="
+            PREVIOUS_COMMIT=$(git rev-parse HEAD)
+
+            BACKUP_DIR="/var/backups/campus-crm/github-deploy-$(date +%Y%m%d-%H%M%S)"
+            mkdir -p "$BACKUP_DIR"
+            chmod 700 "$BACKUP_DIR"
+
+            git bundle create "$BACKUP_DIR/repository.bundle" --all
+            chmod 600 "$BACKUP_DIR/repository.bundle"
+
+            echo "Previous commit: $PREVIOUS_COMMIT"
+
+            HEALTHY=0
+
+            echo "===== DEPLOY NEW VERSION ====="
+
+            if git fetch origin main &&
+               git reset --hard origin/main &&
+               npm ci &&
+               npm run build &&
+               pm2 restart campus-crm-prod; then
+
+              ATTEMPT=1
+              while [ "$ATTEMPT" -le 10 ]; do
+                if curl -fsS --max-time 5 http://127.0.0.1:8082/ > /dev/null; then
+                  HEALTHY=1
+                  break
+                fi
+
+                echo "Health check attempt $ATTEMPT failed."
+                sleep 3
+                ATTEMPT=$((ATTEMPT + 1))
+              done
+            fi
+
+            if [ "$HEALTHY" -eq 1 ]; then
+              echo "===== DEPLOYMENT SUCCESSFUL ====="
+              exit 0
+            fi
+
+            echo "===== DEPLOYMENT FAILED: STARTING ROLLBACK ====="
+
+            if git reset --hard "$PREVIOUS_COMMIT" &&
+               npm ci &&
+               npm run build &&
+               pm2 restart campus-crm-prod; then
+
+              ATTEMPT=1
+              while [ "$ATTEMPT" -le 10 ]; do
+                if curl -fsS --max-time 5 http://127.0.0.1:8082/ > /dev/null; then
+                  echo "Rollback successful. Previous version restored."
+                  exit 1
+                fi
+
+                sleep 3
+                ATTEMPT=$((ATTEMPT + 1))
+              done
+            fi
+
+            echo "CRITICAL: Automatic rollback could not restore a healthy API."
+            exit 1
