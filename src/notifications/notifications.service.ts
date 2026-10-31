@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException, MessageEvent } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationType } from '@prisma/client';
-import { Subject, Observable } from 'rxjs';
+import { Subject, Observable, interval, merge } from 'rxjs';
+import { map } from 'rxjs/operators';
 
 export interface CreateNotificationDto {
   title: string;
@@ -22,7 +23,7 @@ export interface GetNotificationsQueryDto {
 export class NotificationsService {
   private readonly userStreams = new Map<string, Subject<MessageEvent>>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   /**
    * Retrieves or initializes an active SSE stream for a specific authenticated user.
@@ -45,7 +46,20 @@ export class NotificationsService {
       } as MessageEvent);
     }, 50);
 
-    return userSubject.asObservable();
+    const heartbeat$ = interval(25_000).pipe(
+      map(
+        () =>
+          ({
+            data: {
+              type: 'HEARTBEAT',
+              timestamp: new Date().toISOString(),
+            },
+          }) as MessageEvent,
+      ),
+    );
+
+    // The heartbeat subscription ends when the SSE client disconnects.
+    return merge(userSubject.asObservable(), heartbeat$);
   }
 
   /**

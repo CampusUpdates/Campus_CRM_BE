@@ -209,6 +209,14 @@ describe('CounsellingService', () => {
     });
 
     it('6b. Correctly stores structured preferredDate and preferredTime independently for each college request', async () => {
+      const now = new Date();
+      const future1 = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000);
+      const future2 = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
+      const futureDateStr1 = future1.toISOString().split('T')[0];
+      const futureDateStr2 = future2.toISOString().split('T')[0];
+      const parsedDate1 = new Date(`${futureDateStr1}T00:00:00.000Z`);
+      const parsedDate2 = new Date(`${futureDateStr2}T00:00:00.000Z`);
+
       prisma.lead.findUnique.mockResolvedValue({
         id: mockLeadId,
         createdById: mockPaId,
@@ -223,7 +231,7 @@ describe('CounsellingService', () => {
           id: 'req-1',
           leadId: mockLeadId,
           collegeId: mockCollegeId1,
-          preferredDate: new Date('2026-10-30T00:00:00.000Z'),
+          preferredDate: parsedDate1,
           preferredTime: '10:30',
           status: 'REQUESTED',
         })
@@ -231,15 +239,15 @@ describe('CounsellingService', () => {
           id: 'req-2',
           leadId: mockLeadId,
           collegeId: mockCollegeId2,
-          preferredDate: new Date('2026-11-05T00:00:00.000Z'),
+          preferredDate: parsedDate2,
           preferredTime: '15:00',
           status: 'REQUESTED',
         });
 
       const res = await service.createCounsellingRequests(mockPaId, mockLeadId, {
         requests: [
-          { collegeId: mockCollegeId1, preferredDate: '2026-10-30', preferredTime: '10:30', purpose: 'Campus tour' },
-          { collegeId: mockCollegeId2, preferredDate: '2026-11-05', preferredTime: '15:00', purpose: 'Fee discount' },
+          { collegeId: mockCollegeId1, preferredDate: futureDateStr1, preferredTime: '10:30', purpose: 'Campus tour' },
+          { collegeId: mockCollegeId2, preferredDate: futureDateStr2, preferredTime: '15:00', purpose: 'Fee discount' },
         ],
       });
 
@@ -248,7 +256,7 @@ describe('CounsellingService', () => {
         expect.objectContaining({
           data: expect.objectContaining({
             collegeId: mockCollegeId1,
-            preferredDate: new Date('2026-10-30T00:00:00.000Z'),
+            preferredDate: parsedDate1,
             preferredTime: '10:30',
             purpose: 'Campus tour',
           }),
@@ -258,7 +266,7 @@ describe('CounsellingService', () => {
         expect.objectContaining({
           data: expect.objectContaining({
             collegeId: mockCollegeId2,
-            preferredDate: new Date('2026-11-05T00:00:00.000Z'),
+            preferredDate: parsedDate2,
             preferredTime: '15:00',
             purpose: 'Fee discount',
           }),

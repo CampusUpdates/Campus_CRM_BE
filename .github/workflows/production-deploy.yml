@@ -1,0 +1,40 @@
+
+name: Campus CRM Backend - Production
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: campus-crm-backend-production
+  cancel-in-progress: false
+
+jobs:
+  build-and-test:
+    name: Test and Build Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run backend tests
+        run: npm test -- --runInBand
+
+      - name: Build NestJS application
+        run: npm run build
